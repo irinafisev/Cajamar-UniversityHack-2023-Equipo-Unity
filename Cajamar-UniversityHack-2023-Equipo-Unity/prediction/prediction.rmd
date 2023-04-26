@@ -1,0 +1,772 @@
+|                                           |
+|-------------------------------------------|
+| title: "Análisis Predictivo Equipo Unity" |
+| author: "Moisés, Irina, Elena"            |
+| date: "03/04/2023"                        |
+| output: html_document                     |
+
+```{r setup, include=FALSE}
+# knitr::opts_chunk$set(echo = TRUE)
+options(dplyr.summarise.inform = FALSE)
+
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(data.table, dplyr, tidyr, lubridate, ggplot2, forecast, tseries, 
+               ggfortify, skimr, leaps, Boruta, mltools, stats, stringr, ggplot2,
+               ggcorrplot, psych, FactoMineR, factoextra, caret, circular, cowplot,
+               purrr)
+```
+
+# 1. Inicialización
+
+## 1.1 Librerías necesarias
+Nuestro objetivo es entrenar un modelo para ver si luego funciona correctamente. Antes de empezar tenemos que descargar las librerías necesarias para la realización del proyecto.
+
+```{r warning=FALSE}
+library(data.table) 
+library(dplyr) 
+library(tidyr) 
+library(stringr) 
+library(lubridate) 
+library(ggplot2) 
+library(forecast) 
+library(tseries)
+library(ggfortify)
+library(skimr)
+library(leaps)
+library(mltools) 
+library(stats)
+library(Boruta) 
+library(ggplot2)
+library(ggcorrplot)
+library(psych)
+library(FactoMineR)
+library(factoextra)
+library(caret) 
+library(circular)
+library(cowplot)
+library(purrr)
+```
+
+## 1.2 Descarga de datos 
+
+Descargamos los datos `train`, `eto` y `meteo`, y cambiamos al tipo de variable correspondiente a entero, real o factor.
+
+```{r}
+# ETO, contiene información agregada
+eto <- fread(file.path("data","DATOS_ETO.TXT"),  
+                   encoding="Latin-1") %>% 
+  mutate(date = ymd(date), ID_ESTACION = as.factor(ID_ESTACION))
+
+# METEO
+meteo <- fread(file.path("data","DATOS_METEO.TXT"),  
+                   encoding="Latin-1")  %>% 
+  # Separamos la fecha y la hora en diferentes columnas
+  separate(validTimeUtc, c('date', 'time'), sep = " ") %>% 
+  # Cambiamos el formato de las variables, la hora no la hemos cambiado de formato 
+  # porque tenemos en ETO por periodo que es rango de horas
+  mutate(date = ymd(date), ID_ESTACION = as.factor(ID_ESTACION))
+
+# TRAIN
+train <- fread(file.path("data","UH_2023_TRAIN.txt"), encoding="Latin-1")
+names(train)[names(train) == "CAMPAÃ‘A"] <- "CAMPANA"
+train <- train %>% mutate(CAMPANA = as.factor(CAMPANA),
+                          ID_ESTACION = as.factor(ID_ESTACION),
+                          ID_ZONA = as.factor(ID_ZONA),
+                          ID_FINCA = as.factor(ID_FINCA),
+                          VARIEDAD = as.factor(VARIEDAD),
+                          MODO = as.factor(MODO),
+                          TIPO = as.factor(TIPO),
+                          COLOR = as.factor(COLOR),
+                          SUPERFICIE = as.double(SUPERFICIE))
+```
+
+
+# 2. Tratamiento sobre los datasets de los datos
+
+## 2.2 Transformación de variables
+
+### 2.2.1 Selección de variables de meteo
+
+Los datos de `eto` contienen información horaria agregada y transformada de las estaciones climatológicas de The Weather Company por contenidas en `meteo`. Este último dataset dispone de numerosas variables meteorológicas detalladas de la última hora, las últimas 6 horas, las últimas 24 horas, etc., haciendo que `eto` sea un resumen de los periodos con el siguiente patrón: 'Variable + "Local" + periodo + tipo de agregación'.
+
+???Primero veamos qué variables tienen en común:
+
+```{r}
+intersect(names(eto), names(meteo))
+```
+
+Las variables que no están contenidas en el dataset `eto` son las siguientes:
+
+pressureChange, pressureMeanSeaLevel, windDirection , windGust
+
+Por lo tanto, nos quedaremos solo con esas:
+
+```{r}
+meteo <- meteo %>% select(c(date, ID_ESTACION, pressureChange, pressureMeanSeaLevel, windDirection))
+```
+
+### 2.2.2 Variable campaña en eto y meteo
+
+El invierno de un año afectará al año siguiente, por lo tanto los datos relativos a partir de junio de ese año formarán parte de la campaña del año siguiente. Por lo tanto, construimos la variable `CAMPANA` en `eto` siendo que las variables meteorológicas de un año de campaña son los recogidos a partir del 1 de julio de ese año, hasta el 30 de junio del año siguiente. De este modo se podrá unir más adelante por la variable `CAMPANA` y `ID_ESTACION`, ya que los datos de `train` son los datos relativos a la campaña de cada año.
+
+Creamos una variable que sea el año de la producción afectada, es decir, la campaña:
+
+
+```{r}
+# A partir de la nueva variable de CAMPANA podremos unir estos datos con train 
+etoc <- eto %>% mutate(CAMPANA = case_when(month(date)<=6 ~ as.numeric(year(date)),
+                                          month(date)>6 ~ as.numeric(year(date))+1)) %>%
+                mutate(CAMPANA = as.character(CAMPANA)) %>% 
+                mutate(CAMPANA = as.factor(str_sub(CAMPANA, -2, -1)))
+```
+
+Procedemos a hacer la misma operación con los datos de `meteo`:
+
+```{r}
+# A partir de la  nueva variable de CAMPANA podremos unir estos datos con train 
+meteoc <- meteo %>% mutate(CAMPANA = case_when(month(date)<=6 ~ as.numeric(year(date)),
+                                          month(date)>6 ~ as.numeric(year(date))+1)) %>%
+                mutate(CAMPANA = as.character(CAMPANA)) %>% 
+                mutate(CAMPANA = as.factor(str_sub(CAMPANA, -2, -1)))
+```
+
+### 2.2.3 Corrección de la variable date en eto
+
+Una vez creada la variable CAMPAÑA en los datos de eto, al existir los datos para los días 29 y 30 de Junio de 2015, esos días se considerarán como los únicos de la campaña 15. Al no ser representativo únicamente 2 días de todo un año, eliminaremos esas filas.
+
+```{r}
+etoc <- etoc %>% filter(date!='2015-06-29', date!='2015-06-30')
+rm(eto,meteo)
+```
+
+###  2.2.4 Transformación de la dirección del viento windDirection
+
+Cuando se trabaja con la dirección del viento, es común representarlo como un ángulo medido en grados. Sin embargo, cuando se usa la dirección del viento como una característica para un modelo de aprendizaje automático, a menudo es mejor transformarlo usando la función seno y coseno.
+
+La razón de esto es que la dirección del viento es de naturaleza circular, lo que significa que los valores más altos y más bajos están conectados. Por ejemplo, una dirección del viento de 360 grados es equivalente a una dirección del viento de 0 grados. Esta circularidad puede crear problemas al usar la dirección del viento como una característica en un modelo lineal, ya que asume que los valores están relacionados linealmente.
+
+Al transformar la dirección del viento usando la función coseno, puede capturar la circularidad de la variable. Las funciones seno y coseno devuelven un valor entre -1 y 1, con los valores más altos en 0 grados (o 360 grados) y los valores más bajos en 180 grados. Esta transformación puede mejorar el rendimiento de su modelo haciéndolo más resistente a la naturaleza circular de la dirección del viento.
+
+```{r}
+meteoc <- meteoc %>% mutate(
+  # Codificación de windDirection
+  direccion_viento_radianes = windDirection*pi/180,
+  # Transformar en seno y coseno
+  windDirection_sen = sin(direccion_viento_radianes),
+  windDirection_cos = cos(direccion_viento_radianes)) %>% 
+  select(-c(windDirection, direccion_viento_radianes))
+```
+
+## 2.3 Limpieza de NA
+
+### 2.3.1 Variables con muchos valores faltantes en eto
+
+Hay variables meteorológicas que solo se han tomado durante el año 2022 que fue el último año, y otras que se han tomado todos los años menos en 2014 que fue el primero.
+
+```{r}
+threshold <- 0.5
+n <- nrow(etoc)
+non_missing_counts <- sapply(etoc, function(x) sum(!is.na(x)))
+vars_to_keep <- names(etoc)[non_missing_counts / n >= threshold]
+
+# seleccionar las variables que contentan un 50% de valores faltantes
+etoc <- etoc[, ..vars_to_keep]
+```
+
+### 2.3.2 Valores faltantes de los datos meteorológicos
+
+Reemplazamos los valores faltantes por los valores de la media por estación y por mes de cada variable para que no se le de importancia a esos valores faltantes.
+
+```{r message=FALSE, warning=FALSE}
+etoc <- etoc %>% mutate(across(matches('UVIndex'), round))
+
+# Convertimos la variable UVIndex a factor provisionalmente para después sustituir sus valores por la moda en lugar de la media
+etoc <- etoc %>% mutate(across(matches('UVIndex'), as.factor))
+
+# Reemplazamos en las variables numéricas de cada uno de los dataframe los datos faltates. 
+etoc <- etoc %>%
+            group_by(ID_ESTACION, month(date)) %>%
+            mutate_if(is.numeric, function(x) ifelse(is.na(x),
+                                            mean(x, na.rm = TRUE),
+                                            x)) %>% ungroup()
+meteoc <- meteoc %>%
+            group_by(ID_ESTACION, month(date)) %>%
+            mutate_if(is.numeric, function(x) ifelse(is.na(x),
+                                            mean(x, na.rm = TRUE),
+                                            x)) %>% select(!date) %>% ungroup()
+
+# Reemplazamos en UVIndex numéricas de eto los datos faltates. 
+etoc <- etoc %>%
+            group_by(ID_ESTACION, month(date)) %>%
+            mutate(across(matches('UVIndex'), function(x) ifelse(is.na(x),
+                                            mode(x, na.rm = TRUE),
+                                            x))) %>% select(!date) %>% ungroup()
+
+# Volvemos a transformar el tipo de variable para UVIndex a numérico
+etoc <- etoc %>% mutate(across(matches('UVIndex'), as.numeric))
+
+# Eliminamos la variable generada por la agrupación month(date)
+etoc <- etoc[,-213]
+meteoc <- meteoc[,-7]
+
+# Comprobamos que no nos quedamos con los NA
+sum(is.na(etoc))
+sum(is.na(meteoc))
+```
+
+### 2.3.3 Valores faltantes de la variable Superficie
+
+La variable Superficie tiene valores 0 en los perimeros años de campaña, ya que no se disponen datos de la Superficie y viene representado con un '0' en lugar de con NA. Ya que la superficie de los años que sí se dispone presenta pocas diferencias entre los diferentes años de campaña, asumiremos que la superficie es la misma durante todos los años y completaremos los valores faltantes con la media agrupada por Finca.
+
+Primero sustituimos los valores 0 por Na:
+
+```{r}
+train <- train %>% mutate(across(.cols = SUPERFICIE,
+                           .fns = ~ifelse(.x == 0, NA, .x))) 
+```
+
+Para reemplazar los valores faltantes, los sustituimos por la media agrupada por Finca:
+
+```{r}
+train_superficie <- train %>%
+  group_by(ID_FINCA) %>%
+  mutate(SUPERFICIE = ifelse(is.na(SUPERFICIE), mean(SUPERFICIE, na.rm=TRUE), SUPERFICIE)) %>% ungroup()
+```
+
+Como hay Fincas que no tienen valor de superficie en ningún caso, es decir, no existe ninguna fila para la cual ese identificador de finca tenga al menos un valor de superficie, debemos completar esos valores faltantes. Para realizar esa tarea, se predecirán los valores faltantes ya que superficie y producción parece que sigan una regresión lineal.
+
+```{r}
+# Creamos un id para poder separar los datos en entrenamiento y test
+train_superficie_id <- tibble::rowid_to_column(train_superficie, "id")
+
+# establecemos una semilla
+set.seed(450)
+
+# Separamos los datos en entrenamiento (70% de los datos) y test (30% de los datos) de aquellos datos que no contengan valores faltantes en superficie
+train_superficie.train <- train_superficie_id %>% filter(!is.na(SUPERFICIE)) %>% sample_n(6720)  %>% arrange(id)
+train_superficie.test <- train_superficie_id %>% filter((!is.na(SUPERFICIE))&(!id%in%train_superficie.train$id)) %>% arrange(id)
+
+# Hacemos un modelo lm sencillo prediciendo la superficie en funcion de produccion
+lm1 <- lm(SUPERFICIE~PRODUCCION,train_superficie.train)
+summary(lm1)
+
+# Obtenemos las superficies de los valores faltantes tras predecir con el modelo
+pred <- predict(lm1,train_superficie.test)
+
+# Observamos el valor de RSME obtenido
+rmse <- sqrt(mean((train_superficie.test$SUPERFICIE-pred)^2))
+
+# Sustituimos los valores de la predicción por los valores faltantes en los datos
+train_superficie_regresion <- train_superficie %>% mutate(SUPERFICIE=ifelse(is.na(SUPERFICIE),predict(lm1,.),SUPERFICIE))
+
+# Se quedan 2 filas con superficie faltante y sustituimos esos 2 datos por la media agrupada por campaña
+train <- train_superficie_regresion %>% group_by(CAMPANA) %>% mutate(SUPERFICIE = ifelse(is.na(SUPERFICIE), median(SUPERFICIE, na.rm=TRUE), SUPERFICIE)) %>% ungroup()
+
+# Eliminamos las variables que ya no son necesarias
+rm(train_superficie, train_superficie_id, train_superficie.train, train_superficie.test, lm1, pred, rmse, train_superficie_regresion)
+```
+
+# 3. Unión de train, eto y meteo
+
+Como se ha visto en el script `exploratory.rmd` en el análisis exploratorio, la media, el máximo y el mínimo de las variables de ETO están muy correlacionadas entre ellas. Además, los estadísticos de máximo y mínimo no son estadísticos robustos, de modo que solamente se seleccionan las medias (Avg). 
+
+Por otra parte, se selecciona en específico la variable Day, que es la media resultante de las 24 horas del día, y por tanto es la media de la información recogida del resto de franjas horarias ( Daytime, Nighttime, Morning, Afternoon, Evening y Overnight). También se seleccionan las variables Nighttime, ya que podrían ser importantes porque durante la noche es cuando ocurren los cambios meteorológicos más radicales. Por ejemplo, si ocurren fuertes nevadas durante la noche, la producción podría verse perjudicada.
+
+
+```{r}
+# Transformamos temporalmente a factor la variable UVIndex
+etoc_factor <- etoc %>% mutate(across(matches('UVIndex'), as.factor))
+
+# Agrupamos haciendo la media a las variables numéricas
+avgeto_num <- etoc_factor %>% select(CAMPANA, ID_ESTACION, matches(("DayAvg|NighttimeAvg"))) %>% group_by(ID_ESTACION, CAMPANA) %>% summarise_if(is.numeric, mean)
+
+# Creamos una función para agrupar por la moda a las variables de UVIndex
+mode <- function(codes){
+  which.max(tabulate(codes))
+}
+
+# Agrupamos por la moda a las variables de UVIndex
+avgeto_UVIndex <- etoc_factor %>% select(CAMPANA, ID_ESTACION, matches(("DayAvg|NighttimeAvg"))) %>% group_by(ID_ESTACION, CAMPANA) %>% summarise(across(matches('UVIndex'), mode))
+
+# Unimos las variables numéricas y las variables de UVIndex
+avgeto <- left_join(avgeto_num, avgeto_UVIndex, by=c('ID_ESTACION','CAMPANA'))
+
+rm(etoc_factor, avgeto_num, avgeto_UVIndex)
+```
+
+Unimos los datos agregados de `eto` a los datos de `train` por CAMPAÑA y por ID_ESTACION.
+
+```{r}
+traineto <- left_join(train, avgeto, by=c('ID_ESTACION','CAMPANA')) 
+```
+
+Para agrupar `meteo` realizaremos el mismo procedimiento pero quedándonos solamente con las agregaciones de las medias de las variables.
+
+```{r}
+avgmeteo <- meteoc %>% group_by(CAMPANA, ID_ESTACION) %>% summarise(across(.fns=mean))
+```
+
+Finalmente unimos todos los datos:
+
+```{r}
+trainetometeo <- left_join(traineto, avgmeteo, by=c('ID_ESTACION', 'CAMPANA'))
+rm(avgeto, avgmeteo, traineto) #  etoc, meteoc, train
+```
+
+# 4. Split de train y test
+
+Separamos los datos de trainetometeo; test aquellas con \`PRODUCCION\` faltante, y train en el caso contrario, ya que es el año de campaña que queremos predecir (la campaña 22).
+
+Antes de realizar la normalización, como en las variables con campaña 14 y 15 no disponen de datos meteorológicos, se ha decidido eliminar esas observaciones. 
+
+También se ha decidido eliminar la variable ALTITUD porque además de que es una variable que representa rangos, existe una gran cantidad de observaciones para las cuales no tienen altitud. Por otro lado, se ha decidido eliminar la variable campaña para el entrenamiento de los modelos. Una de las razones principales es que no es correcto tratarla como una variable categórica, puesto que el conjunto de test no habría visto nunca observaciones con ese tipo de campaña.
+
+```{r}
+# Antes de separar en train y test debemos quitar campaña y altitud que no vamos a utilizar 
+trainetometeo_test <- trainetometeo %>% 
+  filter(CAMPANA==22) %>% 
+  select(-c(CAMPANA, ALTITUD))
+
+trainetometeo_train <- trainetometeo %>% 
+  filter(CAMPANA!=15 & CAMPANA!=14 & CAMPANA!=22)%>% 
+  select(-c(CAMPANA, ALTITUD))
+
+rm(trainetometeo)
+```
+
+# 5. Normalización y estandarización de los datos
+
+Normalizar los datos antes de calcular la correlación de variables ayuda a garantizar que todas las variables tengan el mismo peso en la correlación y que los resultados sean más precisos y significativos. Además, la normalización de los datos puede ayudar a prevenir la presencia de valores atípicos o errores en los datos que puedan afectar la correlación.
+
+La normalización de los datos, por otro lado, permite comparar y analizar diferentes variables en una misma escala y minimiza el impacto de la variabilidad de las unidades de medida en las diferentes variables. La normalización también puede mejorar la interpretación y la precisión de los modelos de predicción. 
+
+Veamos la distribución de nuestros datos:
+
+```{r función distribuciones}
+# Definir función para crear una cuadrícula de gráficos de densidad
+create_density_grid <- function(df, cols, ncol) {
+  # Crear una lista vacía para almacenar los gráficos
+  plot_list <- list()
+  
+  # Iterar sobre las columnas y crear los gráficos de densidad
+  for (i in colnames(df)[cols]) {
+    plot <- ggplot(df, aes(x = .data[[i]])) + 
+      geom_density() +
+      labs(title = i)  # Utilizar el nombre de la columna como título del gráfico
+    plot_list[[i]] <- plot  # Añadir el gráfico a la lista
+  }
+  # Combinar los gráficos en una cuadrícula utilizando la función plot_grid() de cowplot
+  plot_grid(plotlist = plot_list, ncol = ncol)}
+```
+
+```{r visualización distribuciones}
+# Ejemplo de uso: crear una cuadrícula de gráficos de densidad para las columnas 2 a 10, con 3 columnas por fila
+create_density_grid(trainetometeo_train, 2:10, 3)
+create_density_grid(trainetometeo_train, 10:18, 3)
+create_density_grid(trainetometeo_train, 18:26, 3)
+create_density_grid(trainetometeo_train, 26:31, 3)
+```
+
+Como podemos observar, las variables UVIndexLocalDayAvg y UVIndexLocalNightimeAvg tienen una distribución vacía en los gráficos. Esto es debido a que tienen varianza 0, ya que la mayoría de los valores de esas dos variables toman el mismo valor. Estas dos variables no nos dirán información y por lo tanto las eliminaremos del conjunto de datos.
+
+```{r}
+trainetometeo_train <- trainetometeo_train %>% select(-c(UVIndexLocalDayAvg, UVIndexLocalNighttimeAvg))
+trainetometeo_test <- trainetometeo_test %>% select(-c(UVIndexLocalDayAvg, UVIndexLocalNighttimeAvg))
+```
+
+*¿Qué normalización se tiene que utilizar si los datos meteorológicos siguen una normal?*: Si los datos meteorológicos siguen una distribución normal, entonces se puede utilizar la normalización estándar o Z-score para estandarizar los datos. La normalización Z-score transforma los datos de manera que tengan una media de cero y una desviación estándar de uno. Esto permite comparar los valores de diferentes variables meteorológicas que pueden tener diferentes unidades de medida.
+
+*¿Por qué hacer estandarización y normalización de los datos si podemos realizarle el logaritmo a la variable para forzalo a una normal?*: Aplicar el logaritmo a las variables que no siguen una distribución normal para aplicar una normalización al conjunto de datos puede ser útil en algunos casos, especialmente si la distribución de los datos es muy sesgada. 
+
+Por lo tanto, 
+-  Distribuciones normales: normalización Z-score para estandarizar los datos.
+-  Distribuciones que no siguen una normal: Trasformacion logaritmica + normalización Z-score
+
+Las variables que no siguen una distribución normal son RelativeHumidity, SUPERFICIE y PRODUCCION por lo tanto para realizar la correlación aplicamos la transformación logaritmo a dichas variables. Nos vamos a quedar con dos conjuntos de datos, por un lado con el logaritmo de la PRODUCCION y otro sin a ver como afecta esta transformación a los datos.
+
+Realizamos la normalización de los datos:
+
+```{r}
+# Aplicamos el logaritmo a las variables requeridas
+## trainetometeo log RelativeHumidity|SUPERFICIE|PRODUCCION 
+trainetometeo_train_log_norm <- trainetometeo_train %>% 
+  mutate(across(matches("RelativeHumidity|SUPERFICIE|PRODUCCION"), ~log(.))) 
+trainetometeo_test_log_norm <- trainetometeo_test %>% 
+  mutate(across(matches("RelativeHumidity|SUPERFICIE|PRODUCCION"), ~log(.)))
+
+##  trainetometeo sin log en PRODUCCION
+trainetometeo_train_norm <- trainetometeo_train %>% 
+  mutate(across(matches("RelativeHumidity|SUPERFICIE"), ~log(.))) 
+trainetometeo_test_norm <- trainetometeo_test %>% 
+  mutate(across(matches("RelativeHumidity|SUPERFICIE"), ~log(.)))
+
+# Normalización de los datos de trainetometeo con Z-score
+mean_sd_log <- trainetometeo_train_log_norm %>%
+    reframe(across(where(is.numeric),  ~ c(mean(., na.rm = TRUE), 
+            sd(., na.rm = TRUE))))
+mean_sd <- trainetometeo_train_norm %>%
+    reframe(across(where(is.numeric),  ~ c(mean(., na.rm = TRUE), 
+            sd(., na.rm = TRUE))))
+
+f1 <- function(x, y) (x -y[1])/y[2]
+list2env(map(lst(trainetometeo_train_log_norm, trainetometeo_test_log_norm), ~  {
+   .x[names(mean_sd_log)] <- map2(select(.x, names(mean_sd_log)), mean_sd_log, f1)
+         .x}), .GlobalEnv)
+
+list2env(map(lst(trainetometeo_train_norm, trainetometeo_test_norm), ~  {
+   .x[names(mean_sd)] <- map2(select(.x, names(mean_sd)), mean_sd, f1)
+         .x}), .GlobalEnv)
+
+rm(train, meteoc, etoc, trainetometeo_test, trainetometeo_train)
+```
+
+Después de normalizar los datos, es importante verificar si la distribución resultante se ajusta a una distribución normal. Esto se puede hacer mediante gráficos como el gráfico de QQ, histogramas y pruebas estadísticas como la prueba de Shapiro-Wilk.
+
+```{r}
+# trainetometeo_train_log_norm
+create_density_grid(trainetometeo_train_log_norm, 2:10, 3)
+create_density_grid(trainetometeo_train_log_norm, 10:18, 3)
+create_density_grid(trainetometeo_train_log_norm, 18:26, 3)
+create_density_grid(trainetometeo_train_log_norm, 26:31, 3)
+
+# trainetometeo_train_log_norm
+create_density_grid(trainetometeo_train_norm, 2:10, 3)
+create_density_grid(trainetometeo_train_norm, 10:18, 3)
+create_density_grid(trainetometeo_train_norm, 18:26, 3)
+create_density_grid(trainetometeo_train_norm, 26:31, 3)
+
+rm(create_density_grid)
+```
+
+# 6. Selección de variables numéricas
+
+## 6.1. Correlación 
+
+### 6.1.1. Conjunto de datos normalizados tras aplicar logaritmos: trainetometeo_train_log_norm
+
+Tras haber normalizado las variables, se hace la correlación al conjunto de datos resultante, concretamente la correlación de Pearson, ya que tras aplicar logaritmos las variables se distribuyen normalmente, y se explora con la correlación si la relación entre las variables es lineal. El propósito es determinar cuáles son las variables que tienen mayor relación lineal, y seleccionar aquellas que expliquen una mayor cantidad de variables.
+
+En la correlación se observa que las variables más correlacionadas son el punto de rocío, la humedad relativa, la sensación térmica, la velocidad del viento, el MSLP, todas ellas del día y de la noche, y el volumen de lluvia por hora del día.
+
+```{r}
+# Seleccionamos las variables numéricas
+trainetometeo_train_log_norm_num <- trainetometeo_train_log_norm %>% select_if(is.numeric)
+
+# Hacemos la correlación
+trainetometeo_train_log_norm_corr <- cor(trainetometeo_train_log_norm_num)
+
+# Miramos sus gráfica:
+# symnum(trainetometeo_train_log_norm_corr) 
+```
+
+Como en el gráfico no podemos observar bien las distintas correlaciones. Realizamos el siguiente código para seleccionar las correlaciones mayores a 0.8.
+
+```{r}
+# Seleccionar las correlaciones mayores a 0.8
+correlaciones_seleccionadas <- 
+  which(abs(trainetometeo_train_log_norm_corr) > 0.8, arr.ind = TRUE)
+
+# Obtener los nombres de las variables correspondientes
+nombres_correlaciones <-
+  paste(rownames(trainetometeo_train_log_norm_corr)[correlaciones_seleccionadas[, 1]],
+        colnames(trainetometeo_train_log_norm_corr)[correlaciones_seleccionadas[, 2]],
+        sep = " y")
+
+# Imprimir las correlaciones seleccionadas y sus nombres de variable correspondientes
+# cat("Las correlaciones mayores a 0.8 son:\n")
+# for (i in 1:nrow(correlaciones_seleccionadas)) {
+#    cat(nombres_correlaciones[i], ": ",
+#        trainetometeo_train_log_norm_corr[correlaciones_seleccionadas[i, 1],
+#                                          correlaciones_seleccionadas[i, 2]], "\n")}
+```
+
+Hemos visto todas las variables seleccionadas, mayores de 0.8. Utilizando la función findCorrelation seleccionamos las variables que tenemos que eliminar para tener un conjunto de datos sin correlaciones.
+
+```{r}
+# Utilizamos la funcion findcorrelation
+alta_cor <- findCorrelation(trainetometeo_train_log_norm_corr, cutoff = 0.80) 
+
+# Eliminamos las variables devueltas por findcorrelation
+trainetometeo_train_log_norm_num_corr <- trainetometeo_train_log_norm_num[, -alta_cor]
+
+# Seleccionamos las variables no numéricas
+trainetometeo_train_log_norm_nonum <- trainetometeo_train_log_norm %>% select_if(is.factor)
+
+# Juntamos las variables numéricas tras la correlación con las variables no numéricas
+trainetometeo_train_log_norm_noncorr <- cbind(trainetometeo_train_log_norm_nonum, trainetometeo_train_log_norm_num_corr)
+
+# La correlación hecha por findCorrelation sería la siguiente:
+cor(trainetometeo_train_log_norm_noncorr %>% select_if(is.numeric))
+ggcorrplot(cor(trainetometeo_train_log_norm_noncorr %>% select_if(is.numeric)))
+
+rm(trainetometeo_train_log_norm_num,
+ trainetometeo_train_log_norm_num_corr, trainetometeo_train_log_norm_nonum)
+```
+
+?? Explicar que una vez hecha la correlación nos damos cuenta que las siguientes variables son las que más se correlacionan con la producción. Mostramos por un lado a la izquierda las variables y a su derecha la correlación con la producción.
+
+```{r}
+orden_cor <- sort(abs(trainetometeo_train_log_norm_corr["PRODUCCION",]), decreasing = TRUE)
+```
+
+Podemos observar que las variables que más se correlacionan con la producción son SUPERFICIE,
+windDirection_cos, windDirection_sen, WindSpeedLocalDayAvg, WindSpeedLocalNighttimeAvg, TemperatureLocalDayAvg, TemperatureLocalNighttimeAvg. Podemos ver que estas variables son muy parecidas 
+
+```{r}
+trainetometeo_train_log_norm_corr1 <- trainetometeo_train_log_norm %>% 
+  select(ID_FINCA, ID_ZONA, ID_ESTACION, VARIEDAD, MODO, TIPO, COLOR, SUPERFICIE, 
+         PRODUCCION, windDirection_cos, windDirection_sen, WindSpeedLocalDayAvg, 
+         WindSpeedLocalNighttimeAvg, TemperatureLocalDayAvg, TemperatureLocalNighttimeAvg)
+
+cor(trainetometeo_train_log_norm_corr1 %>% select_if(is.numeric))
+ggcorrplot(cor(trainetometeo_train_log_norm_corr1 %>% select_if(is.numeric)))
+```
+
+Aún así, estas variables siguen teniendo correlaciones entre ellas por lo que podríamos decir que:
+
+- windDirection_cos y windDirection_sen están altamente correlacionadas entre ellas y con las varaibles WindSpeedLocalDayAvg y WindSpeedLocalNighttimeAvg. De estas varaibles vamos a quedarnos únicamente con WindSpeedLocalDayAvg ya que es la variable más correlacionada entre las tres.
+
+Por lo tanto nos quedaríamos con el siguiente conjunto de datos a probar por la correlación. Nos interesa quedarnos con la Temperatura tanto por el día como por la noche por lo que hemos comentado anteriormente de las fuertes nevadas por las noches.
+
+```{r}
+# trainetometeo_train_norm_tempwind
+trainetometeo_train_log_norm_corr2 <- trainetometeo_train_norm %>% 
+  select(ID_FINCA, ID_ZONA, ID_ESTACION,VARIEDAD, MODO, TIPO, COLOR, SUPERFICIE, 
+         PRODUCCION, TemperatureLocalDayAvg,TemperatureLocalNighttimeAvg, WindSpeedLocalDayAvg)
+
+cor(trainetometeo_train_log_norm_corr2 %>% select_if(is.numeric))
+ggcorrplot(cor(trainetometeo_train_log_norm_corr2 %>% select_if(is.numeric)))
+```
+
+### 6.1.2. Conjunto de datos normalizados sin aplicar logaritmos: trainetometeo_train_norm
+
+De la misma manera de antes vamos a estudiar las correlaciones del conjunto de datos trainetometeo_train_norm.
+
+```{r}
+cor_prueba <- cor(trainetometeo_train_norm %>% select_if(is.numeric))
+ggcorrplot(cor(trainetometeo_train_norm %>% select_if(is.numeric)))
+```
+
+Vamos a eliminar primero las variables con correlaciones más altas. Como podemos observar que la variable DewpointLocalDayAvg, DewpointLocalNighttimeAvg se correlaciona con las variables de temperatura, FeelsLike y humedad, además de con la variable visibility. Decidimos eliminar Dewpoint y quedarnos con mayor número de variables ya que cada variable nos aportan entre ellas información diferente. 
+
+Además también podemos observar que FeelsLikeLocalDayAvg,  FeelsLikeLocalNighttimeAvg y TemperatureLocalNighttimeAvg están altamente corelacionada con TemperatureLocalDayAvg. En este caso como se trata de variables similares nos quedaremos únicemente con una de ellas, en este caso TemperatureLocalDayAvg ya que tiene mayor correlación que con todas las demás.
+
+Por otro lado la variable pressureMeanSeaLevel se correlaciona altamente correlacionado con MSLPLocalDayAvg y  PrecipAmountLocalNighttimeAvg que esta atamente correlacinado con PrecipAmountLocalDayAvg.
+
+```{r}
+cor_prueba2 <- cor(trainetometeo_train_norm %>% select_if(is.numeric) %>% 
+                     select(-c(DewpointLocalDayAvg, DewpointLocalNighttimeAvg, 
+                               FeelsLikeLocalDayAvg,  FeelsLikeLocalNighttimeAvg,
+                               TemperatureLocalNighttimeAvg, pressureMeanSeaLevel,
+                               PrecipAmountLocalNighttimeAvg)))
+ggcorrplot(cor_prueba2)
+```
+
+Quitando las variables correlacionadas más altas podemos observar que seguimos teniendo correlaciones entre los datos, lo que nos indica que podemos seguir reducciendo nuestro conjunto de datos final. 
+
+Por un lado tenemos que la correlación más alta es RelativeHumidityLocalDayAvg con VisibilityLocalDayAvg y VisibilityLocalNighttimeAvg. Seleccionamos únicamente RelativeHumidityLocalDayAvg ya que puede explicar estas dos variables.
+
+```{r}
+cor_prueba3 <- cor(trainetometeo_train_norm %>% select_if(is.numeric) %>% 
+                     select(-c(DewpointLocalDayAvg, DewpointLocalNighttimeAvg, 
+                               FeelsLikeLocalDayAvg,  FeelsLikeLocalNighttimeAvg,
+                               TemperatureLocalNighttimeAvg, pressureMeanSeaLevel,
+                               PrecipAmountLocalNighttimeAvg, VisibilityLocalDayAvg,
+                               VisibilityLocalNighttimeAvg, RelativeHumidityLocalNighttimeAvg)))
+ggcorrplot(cor_prueba3)
+```
+
+Queremos quitarnos los máximos lilas y rojos de nuestra correlación 
+
+-  pressureChange y MSLPLocalNighttimeAvg están correlacionadas con MSLPLocalDayAvg. 
+-  WindSpeedLocalDayAvg está correlacionado con WindSpeedLocalNighttimeAvg
+-  windDirection con WindSpeedLocalDayAvg y WindSpeedLocalNighttimeAvg
+-  SnowAmountLocalNighttimeAvg con PrecipAmountLocalDayAvg 
+
+```{r}
+cor_prueba3 <- cor(trainetometeo_train_norm %>% select_if(is.numeric) %>% 
+                     select(-c(DewpointLocalDayAvg, DewpointLocalNighttimeAvg, 
+                               FeelsLikeLocalDayAvg,  FeelsLikeLocalNighttimeAvg,
+                               TemperatureLocalNighttimeAvg, pressureMeanSeaLevel,
+                               PrecipAmountLocalNighttimeAvg, VisibilityLocalDayAvg,
+                               VisibilityLocalNighttimeAvg, RelativeHumidityLocalNighttimeAvg, 
+                               pressureChange, MSLPLocalNighttimeAvg, WindSpeedLocalNighttimeAvg,
+                               windDirection_cos, windDirection_sen,SnowAmountLocalNighttimeAvg, 
+                               SnowAmountLocalDayAvg, PrecipAmountLocalNighttimeAvg)))
+ggcorrplot(cor_prueba3)
+```
+Como podemos observar en el gráfico de arriba la variable más correlacionada en este caso es RelativeHumidityLocalDayAvg con PrecipAmountLocalDayAvg por lo tanto probamos también quitando RelativeHumidityLocalDayAvg. Finalmente nos quedamos con 2 conjuntos de datos trainetometeo_train_norm que serían los siguinetes:
+
+```{r}
+trainetometeo_train_norm_simple <- trainetometeo_train_norm %>%
+  select(PRODUCCION,ID_FINCA,ID_ZONA,ID_ESTACION,VARIEDAD,MODO,TIPO,COLOR,
+         SUPERFICIE, MSLPLocalDayAvg, PrecipAmountLocalDayAvg, RelativeHumidityLocalDayAvg,
+         TemperatureLocalDayAvg, WindSpeedLocalDayAvg)
+
+trainetometeo_train_norm_simple2 <- trainetometeo_train_norm %>%
+  select(PRODUCCION,ID_FINCA,ID_ZONA,ID_ESTACION,VARIEDAD,MODO,TIPO,COLOR,
+         SUPERFICIE,  MSLPLocalDayAvg, PrecipAmountLocalDayAvg, #RelativeHumidityLocalDayAvg
+         TemperatureLocalDayAvg, WindSpeedLocalDayAvg) 
+```
+
+## 6.2. Regresión lineal simple
+
+Este método implica ajustar un modelo de regresión inicial que incluya todas las variables y luego eliminar iterativamente las variables menos significativas hasta que se logre un modelo óptimo. La significación se determina utilizando una prueba estadística, como la prueba t o la prueba F.
+
+En R, puedes usar la función step() para aplicar el método de eliminación hacia atrás y seleccionar las variables más significativas. La función step() ajusta un modelo inicial y luego elimina de forma iterativa las variables menos significativas hasta que se alcanza el modelo final. Para ello, se utiliza una prueba estadística para determinar la significación de cada variable.
+
+Realizamos una regresión lineal simple de todas las variables. Podemos ver cuanto de significativa es vada variable en la variable a predecir (PRODUCCIÓN).
+
+```{r}
+lm1 <- lm(PRODUCCION ~ ., data = trainetometeo_train_norm)
+lm2 <- lm(PRODUCCION ~ ., data = trainetometeo_train_log_norm)
+#step(lm1)
+#step(lm2)
+```
+
+Seleccionamos las variables significativas hasta que obtenemos un modelo de regresión lineal con un AI 
+
+```{r}
+# AIC: AIC=-8494.55
+lm1_best <- lm(formula = PRODUCCION ~ ID_FINCA + VARIEDAD + MODO + 
+    TIPO + SUPERFICIE + DewpointLocalNighttimeAvg + FeelsLikeLocalNighttimeAvg + 
+    MSLPLocalNighttimeAvg + PrecipAmountLocalDayAvg + PrecipAmountLocalNighttimeAvg + 
+    RelativeHumidityLocalDayAvg + RelativeHumidityLocalNighttimeAvg + 
+    WindSpeedLocalDayAvg + WindSpeedLocalNighttimeAvg + pressureMeanSeaLevel, 
+    data = trainetometeo_train_norm)
+#summary(lm1_best)
+
+# AIC:  AIC=-8469.19
+lm2 <- lm(PRODUCCION ~ ID_FINCA + VARIEDAD + MODO + TIPO + SUPERFICIE + 
+    DewpointLocalDayAvg + DewpointLocalNighttimeAvg + MSLPLocalNighttimeAvg + 
+    PrecipAmountLocalDayAvg + PrecipAmountLocalNighttimeAvg + 
+    RelativeHumidityLocalDayAvg + RelativeHumidityLocalNighttimeAvg + 
+    SnowAmountLocalDayAvg + SnowAmountLocalNighttimeAvg + TemperatureLocalNighttimeAvg + 
+    VisibilityLocalDayAvg + WindSpeedLocalDayAvg + WindSpeedLocalNighttimeAvg + 
+    pressureMeanSeaLevel + windDirection_sen + windDirection_cos,
+    data = trainetometeo_train_log_norm)
+# summary(lm2)
+```
+
+```{r}
+trainetometeo_train_norm_lm1 <- trainetometeo_train_norm %>%
+  select( ID_FINCA, VARIEDAD, MODO, TIPO, SUPERFICIE, PRODUCCION,
+         DewpointLocalNighttimeAvg, FeelsLikeLocalNighttimeAvg,
+         MSLPLocalNighttimeAvg, PrecipAmountLocalDayAvg,
+         PrecipAmountLocalNighttimeAvg, RelativeHumidityLocalDayAvg,
+         RelativeHumidityLocalNighttimeAvg, WindSpeedLocalDayAvg,
+         WindSpeedLocalNighttimeAvg, pressureMeanSeaLevel)
+
+trainetometeo_train_log_norm_lm2 <- trainetometeo_train_log_norm %>% 
+  select(PRODUCCION, ID_FINCA, VARIEDAD, MODO, TIPO, SUPERFICIE,
+         DewpointLocalDayAvg, DewpointLocalNighttimeAvg, MSLPLocalNighttimeAvg,
+         PrecipAmountLocalDayAvg, PrecipAmountLocalNighttimeAvg,
+         RelativeHumidityLocalDayAvg, RelativeHumidityLocalNighttimeAvg,
+         SnowAmountLocalDayAvg, SnowAmountLocalNighttimeAvg, TemperatureLocalNighttimeAvg,
+         VisibilityLocalDayAvg, WindSpeedLocalDayAvg, WindSpeedLocalNighttimeAvg, 
+         pressureMeanSeaLevel, windDirection_sen, windDirection_cos)
+```
+
+
+## 6.3. Descarga de datasets de la seleccion de variables 
+
+Nos vamos a quedar con 4 conjuntos de datos realizados por la correlación que serían los siguientes:
+
+- trainetometeo_train_log_norm_corr1
+- trainetometeo_train_log_norm_corr2 - GANADOR trainetometeo_train_norm_tempwind
+- trainetometeo_train_norm_simple
+- trainetometeo_train_norm_simple2
+
+Además nos quedamos con 2 conjuntos de datos más realizados con la regresión lineal.
+
+- trainetometeo_train_log_norm_lm
+- trainetometeo_train_norm_lm
+
+```{r}
+### Correlacion
+# Obtener una lista de variables en común de train y test 
+common_vars1 <- intersect(names(trainetometeo_train_log_norm_corr1), names(trainetometeo_test_log_norm))
+common_vars2 <- intersect(names(trainetometeo_train_log_norm_corr2), names(trainetometeo_test_norm))
+common_vars3 <- intersect(names(trainetometeo_train_norm_simple), names(trainetometeo_test_norm))
+common_vars4 <- intersect(names(trainetometeo_train_norm_simple2), names(trainetometeo_test_norm))
+
+# Seleccionar variables en común usando select()
+trainetometeo_test_log_norm_corr1 <- select(trainetometeo_test_log_norm, all_of(common_vars1))
+trainetometeo_test_log_norm_corr2 <- select(trainetometeo_test_norm, all_of(common_vars2))
+trainetometeo_test_norm_simple <- select(trainetometeo_test_norm, all_of(common_vars3))
+trainetometeo_test_norm_simple2 <- select(trainetometeo_test_norm, all_of(common_vars4))
+
+# Finalmente, según la correlación simple nos quedamos con el siguiente conjunto de datos de train y test:
+write.table(trainetometeo_train_log_norm_corr1, 
+  "data_pruebas/trainetometeo_train_log_norm_corr1.txt", 
+  sep=",", dec=".", row.names=FALSE)
+write.table(trainetometeo_test_log_norm_corr1, 
+  "data_pruebas/trainetometeo_test_log_norm_corr1.txt", 
+  sep=",", dec=".", row.names=FALSE)
+write.table(trainetometeo_train_log_norm_corr2, 
+  "data_pruebas/trainetometeo_train_log_norm_corr2.txt", 
+  sep=",", dec=".", row.names=FALSE)
+write.table(trainetometeo_test_log_norm_corr2, 
+  "data_pruebas/trainetometeo_test_log_norm_corr2.txt", 
+  sep=",", dec=".", row.names=FALSE)
+
+write.table(trainetometeo_train_norm_simple, 
+  "data_pruebas/trainetometeo_train_norm_simple.txt", 
+  sep=",", dec=".", row.names=FALSE)
+write.table(trainetometeo_test_norm_simple, 
+  "data_pruebas/trainetometeo_test_norm_simple.txt", 
+  sep=",", dec=".", row.names=FALSE)
+write.table(trainetometeo_train_norm_simple2, 
+  "data_pruebas/trainetometeo_train_norm_simple2.txt", 
+  sep=",", dec=".", row.names=FALSE)
+write.table(trainetometeo_test_norm_simple2, 
+  "data_pruebas/trainetometeo_test_norm_simple2.txt", 
+  sep=",", dec=".", row.names=FALSE)
+```
+
+```{r}
+### Regresión lineal simple [6,262 × 16]
+# Obtener una lista de variables en común de train y test 
+common_vars1 <- intersect(names(trainetometeo_train_norm_lm1), names(trainetometeo_test_norm))
+common_vars2 <- intersect(names(trainetometeo_train_log_norm_lm2), names(trainetometeo_test_log_norm))
+
+# Seleccionar variables en común usando select()
+trainetometeo_test_norm_lm1 <- select(trainetometeo_test_norm, all_of(common_vars1))
+trainetometeo_test_log_norm_lm2 <- select(trainetometeo_test_log_norm, all_of(common_vars2))
+
+# Finalmente, según la regresión lineal nos quedamos con el siguiente conjunto de datos de train y test:
+write.table(trainetometeo_train_norm_lm1, 
+  "data_pruebas/trainetometeo_train_norm_lm1.txt", 
+  sep=",", dec=".", row.names=FALSE)
+write.table(trainetometeo_test_norm_lm1, 
+  "data_pruebas/trainetometeo_test_norm_lm1.txt", 
+  sep=",", dec=".", row.names=FALSE)
+
+write.table(trainetometeo_train_log_norm_lm2, 
+  "data_pruebas/trainetometeo_train_log_norm_lm2.txt", 
+  sep=",", dec=".", row.names=FALSE)
+write.table(trainetometeo_test_log_norm_lm2, 
+  "data_pruebas/trainetometeo_test_log_norm_lm2.txt", 
+  sep=",", dec=".", row.names=FALSE)
+```
+
+
+# 7. Mejor dataset seleccionado (Resultado: Norm+Corr)
+
+Eliminamos todos los datasets para quedarnos únicamente con el ganador 
+
+```{r}
+# Elimina todos los objetos excepto trainetometeo_train_log_norm_corr2
+rm(list = ls()[!ls() %in% "trainetometeo_train_log_norm_corr2"])
+```
+
+?? Poner una captura de los modelos para explicar que nos quedamos con el trainetometeo_train_norm la segunda correlación que sería: trainetometeo_train_log_norm_corr2
+
+?? Tenemos que explicar que para basarnos en los datos de la correlación hemos utilizado los datos en log pero que a la hora de seleccionar las variables en el conjunto de datos le hemos quitado el log para no perder la interpretación de los datos y puede ser menos útil cuando se desea comparar las relaciones relativas entre las variables.
+
+?? Una vez decidamos cuáles son los procesos de selección de características que nos producen mejores resultados. Podemos decir definitvamente que es el siguiente:
+
+```{r}
+summary(trainetometeo_train_log_norm_corr2)
+```
+

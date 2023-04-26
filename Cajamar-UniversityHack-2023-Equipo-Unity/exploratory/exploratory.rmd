@@ -1,0 +1,1902 @@
+---
+title: "Análisis Exploratorio Equipo Unity"
+author: "Moisés, Irina, Elena"
+date: "03/04/2023"
+output: html_document
+---
+
+NOTA: Para ejecutar las siguientes celda, es necesario haber ejecutado `prediction.rmd` en su totalidad.
+
+```{r setup, include=FALSE}
+# knitr::opts_chunk$set(echo = TRUE)
+options(dplyr.summarise.inform = FALSE)
+
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(data.table, dplyr, tidyr, lubridate, ggplot2, forecast, tseries, 
+               ggfortify, skimr, leaps, Boruta, mltools, stats, stringr, ggplot2,
+               ggcorrplot, psych, FactoMineR, factoextra, caret, circular, cowplot,
+               purrr)
+```
+
+```{r warning=FALSE}
+library(data.table) 
+library(dplyr) 
+library(tidyr) 
+library(stringr) 
+library(lubridate) 
+library(ggplot2) 
+library(forecast) 
+library(tseries)
+library(ggfortify)
+library(skimr)
+library(leaps)
+library(mltools) 
+library(stats)
+library(Boruta) 
+library(ggplot2)
+library(ggcorrplot)
+library(psych)
+library(FactoMineR)
+library(factoextra)
+library(caret) 
+library(circular)
+library(cowplot)
+library(purrr)
+```
+
+# Adquisición de los datos
+
+Descargamos los datos `train`, `eto` y `meteo`, asignando a cada columna el tipo pertinente entero, real o factor.
+
+```{r}
+# ETO, contiene información agregada
+eto <- fread(file.path("data","DATOS_ETO.TXT"),  
+                   encoding="Latin-1") %>% 
+  mutate(date = ymd(date), ID_ESTACION = as.factor(ID_ESTACION))
+
+# METEO
+meteo <- fread(file.path("data","DATOS_METEO.TXT"),  
+                   encoding="Latin-1")  %>% 
+  # Separamos la fecha y la hora en diferentes columnas
+  separate(validTimeUtc, c('date', 'time'), sep = " ") %>% 
+  # Cambiamos el formato de las variables, la hora no la hemos cambiado de formato 
+  # porque tenemos en ETO por periodo que es rango de horas
+  mutate(date = ymd(date), ID_ESTACION = as.factor(ID_ESTACION))
+
+# TRAIN
+train <- fread(file.path("data","UH_2023_TRAIN.txt"), encoding="Latin-1")
+names(train)[names(train) == "CAMPAÃ‘A"] <- "CAMPANA"
+train <- train %>% mutate(CAMPANA = as.factor(CAMPANA),
+                          ID_ESTACION = as.factor(ID_ESTACION),
+                          ID_ZONA = as.factor(ID_ZONA),
+                          ID_FINCA = as.factor(ID_FINCA),
+                          VARIEDAD = as.factor(VARIEDAD),
+                          MODO = as.factor(MODO),
+                          TIPO = as.factor(TIPO),
+                          COLOR = as.factor(COLOR),
+                          SUPERFICIE = as.double(SUPERFICIE))
+```
+
+
+# 2.  Análisis exploratorio 
+tras la modificación de variables
+
+Antes de comenzar con el análisis exploratorio, verificamos el tipo de las clases:
+```{r}
+glimpse(train)
+glimpse(eto)
+glimpse(meteo)
+```
+
+Vamos a hacer un primer análisis exploratorio sencillo con la librería skimr del conjunto de datos de train, ya que es el que menos variables tiene. No mostramos la de eto y meteo porque tienen muchas variables y es muy extenso.
+
+```{r}
+skim(train)
+# skim(eto)
+# skim(meteo)
+```
+
+
+## 2.1.Valores faltantes 
+
+Veamos los valores faltantes de train, eto y meteo:
+
+```{r}
+gg_miss_var(train, facet = CAMPANA)
+gg_miss_var(meteo)
+gg_miss_var(eto[,1:55])
+gg_miss_var(eto[,56:110])
+gg_miss_var(eto[,111:165])
+gg_miss_var(eto[,166:220])
+gg_miss_var(eto[,221:275])
+```
+
+En los datos de train los valores faltantes son de aquellas fincas que debemos predecir del año 2022. También hay valores faltantes en eto y meteo. Los valores faltantes de eto y meteo son los relativos a un año en concreto. 
+
+
+Exploremos los datos de train:
+
+```{r}
+train %>% select(CAMPANA,ID_FINCA, VARIEDAD, PRODUCCION)%>%
+  arrange(PRODUCCION)
+```
+
+El peor ha sido con CAMPAÑA ID_FINCA VARIEDAD PRODUCCION 21	31153	32	0.7180 respectivamente. También vemos que de la ID_FINCA = 27166	VARIEDAD = 59, todos los años ha sido una de las mas bajas. Tenemos que averiguar cuáles son las condiciones que han tenido cada una de ellas para que salga esto.
+
+Visualizamos los datos de train:
+
+```{r}
+pairs(PRODUCCION ~ ., train %>% select(CAMPANA, ID_FINCA, ID_FINCA, ID_ESTACION, SUPERFICIE, PRODUCCION))
+```
+
+Visualizamos los datos de producción por campaña
+
+```{r}
+train %>% filter(CAMPANA!=22) %>% mutate(PRODUCCION=log(PRODUCCION)) %>% ggplot(aes( x=CAMPANA, y=PRODUCCION)) + geom_boxplot() 
+```
+
+```{r}
+plot(density(log(train$PRODUCCION), na.rm=TRUE))
+```
+
+Veamos si los datos de las fincas están proporcionados:
+
+```{r}
+# train %>% ggplot(aes(x=ID_FINCA))+geom_histogram(fill='darkblue')
+# test %>% ggplot(aes(x=ID_FINCA))+geom_histogram(fill='darkblue')
+```
+
+Veamos la producción promedia por finca:
+
+```{r}
+train %>% group_by(ID_FINCA) %>% mutate(avg = mean(PRODUCCION)) %>% ggplot(aes(group = ID_FINCA, x=ID_FINCA, y=avg)) + geom_point(color='darkblue') + facet_grid(.~MODO)
+
+```
+
+Parece que el MODO 2 alcanza mejores producciones que el cultivo 1. Si agrupamos por MODO:
+
+```{r}
+train %>% group_by(MODO)%>% ggplot(aes(group = MODO, x=MODO, y=PRODUCCION)) + geom_boxplot() 
+```
+
+Agrupando por MODO parece que efectivamente el cultivo 2 tiene ligeramente mejores producciones.
+
+Veamos producción y superficie:
+
+```{r}
+train %>% group_by(MODO)%>% ggplot(aes(x=log(SUPERFICIE), y=log(PRODUCCION))) + geom_point() 
+```
+
+Para juntar mejor los datos transformamos a logaritmos las variables PRODUCCION Y SUPERFICIE. Notamos que a mayor superficie mayor producción, bastante razonable, con lo cual parece que tengan una relación lineal.
+
+
+## 2.2. Series temporales de eto
+
+Analizamos algunas de las series temporales de los datos meteorológicos.
+
+```{r}
+# Gráfica de la temperatura media por año 
+TempDayAvg_y <- eto %>% select(date, ID_ESTACION, TemperatureLocalDaytimeAvg)
+
+TempDayAvg_y %>%
+  mutate(year = ymd(date)) %>%
+  group_by(year) %>%
+  summarise(
+    AvgTemeratura = mean(TemperatureLocalDaytimeAvg, na.rm = TRUE),
+    n = n() ) %>%
+  
+  ggplot(aes(year, AvgTemeratura)) +
+  geom_line()
+```
+
+
+```{r}
+# Gráfica de la temperatura media por año y mes
+TempDayAvg_my <- eto %>% select(date, ID_ESTACION, TemperatureLocalDaytimeAvg)
+
+# Coloreado por estación podemos ver que las estaciones de mayor número tienen temperaturas más bajas 
+TempDayAvg_my %>%
+  mutate(fecha = ymd(date), 
+         mes = month(fecha),
+         year = year(fecha)) %>%
+  group_by(mes,year, ID_ESTACION) %>%
+  summarise(
+    AvgTemeratura = mean(TemperatureLocalDaytimeAvg, na.rm = TRUE),
+    n = n() ) %>% 
+  ggplot(aes(x = mes, AvgTemeratura)) +
+  geom_line(aes(color =  ID_ESTACION)) + 
+  facet_wrap(~ year)
+
+# Veamos el 2019 en grande a ver si es así
+
+TempDayAvg_my %>%
+  mutate(fecha = ymd(date), 
+         mes = month(fecha),
+         year = year(fecha)) %>% 
+  filter(year == "2019") %>% 
+  group_by(mes,year, ID_ESTACION) %>%
+  summarise(
+    AvgTemeratura = mean(TemperatureLocalDaytimeAvg, na.rm = TRUE),
+    n = n() ) %>% 
+  ggplot(aes(x = mes, AvgTemeratura)) +
+  geom_line(aes(color =  ID_ESTACION)) 
+
+# Además solapando los años en una misma gráfica podemos observar
+TempDayAvg_my %>%
+  mutate(fecha = ymd(date), 
+         mes = month(fecha),
+         year = year(fecha)) %>%
+  group_by(mes,year) %>%
+  summarise(
+    AvgTemeratura = mean(TemperatureLocalDaytimeAvg, na.rm = TRUE),
+    n = n() ) %>% 
+  ggplot(aes(x = mes, AvgTemeratura)) +
+  geom_line(aes(color =  factor(year)))
+```
+
+Coloreado por estación podemos ver que las estaciones de ID más alto tienen temperaturas más bajas. Haciendo el gráfico solo del año 2019 podemos observar que es así (para ese año en este caso). Por último solapando los años en una misma gráfica podemos observar la relación de la temperatura en comparación con todos los años. Parece que ha habido una temperatura estable a lo largo de todos los años, pero notamos un pico que ???.
+
+
+Seleccionamos una estación y visualizamos la variable DewpointLocalAfternoonAvg_1 para el ID_ESTACION 0:
+
+```{r}
+id1 <- eto %>% filter(ID_ESTACION == 0)
+
+# ts by day
+etots <- ts(id1$DewpointLocalAfternoonAvg, start = c(2015, 6, 29), end = c(2022, 6, 30), frequency = 365)
+# plot(etots, main = '')
+ 
+# tss by month
+avgetots <- ts(eto, start = c(2015, 6), end = c(2022, 6), frequency = 12)
+# plot(avgetots, main='')
+```
+
+```{r}
+indx <- grepl('DewpointLocalAfternoon', colnames(eto))
+avgetodew <- eto %>% group_by(ID_ESTACION) %>% select(c('date', colnames(eto)[indx]))
+avgetodewts <- ts(avgetodew, start = c(2015, 6), end = c(2022, 6), frequency = 12)
+plot(avgetodewts[,-c(1,2)], main='')
+```
+
+
+
+## 2.3. Análisis de superficie train
+
+La variable Superficie tiene valores 0 en los perimeros años de campaña, ya que no se disponen datos de la Superficie y viene representado con un '0' en lugar de con NA. Ya que la superficie de los años que sí se dispone presenta pocas diferencias entre los diferentes años de campaña, asumiremos que la superficie es la misma durante todos los años y completaremos los valores faltantes con la media agrupada por Finca.
+
+Visualizamos primero la variable Superficie:
+```{r}
+plot(density(train$SUPERFICIE))
+qqnorm(train$SUPERFICIE, main='Normal')
+qqline(train$SUPERFICIE)
+train %>%
+  ggplot(aes(ID_FINCA, SUPERFICIE)) +
+  geom_point()
+```
+
+Como se puede observar, hay muchos valores con superficie 0.
+
+Sustituimos estos valores por NA y representamos la densidad de aquellos datos que sí disponen valor de Superficie:
+
+```{r}
+train_superficie <- train %>% mutate(across(.cols = SUPERFICIE,
+                           .fns = ~ifelse(.x == 0, NA, .x))) 
+plot(density(train_superficie$SUPERFICIE, na.rm=TRUE))
+train_superficie %>%
+  ggplot(aes(ID_FINCA, SUPERFICIE)) +
+  geom_point()
+```
+
+Para reemplazar los valores faltantes, los sustituimos por la media agrupada por Finca:
+
+```{r}
+train_superficie <- train_superficie %>%
+  group_by(ID_FINCA) %>%
+  mutate(SUPERFICIE = ifelse(is.na(SUPERFICIE), mean(SUPERFICIE, na.rm=TRUE), SUPERFICIE)) %>% ungroup()
+plot(density(train_superficie$SUPERFICIE, na.rm=TRUE))
+train_superficie %>%
+  ggplot(aes(ID_FINCA, SUPERFICIE)) +
+  geom_point()
+```
+
+Como hay Fincas que no tienen valor de superficie en ningún caso, es decir, no existe ninguna fila para la cual ese identificador de finca tenga al menos un valor de superficie, debemos completar esos valores faltantes. Para realizar esa tarea, se abordará de 2 formas:
+1. Se sustituirán dichos valores por la mediana agrupada por la campaña. Se elige la mediana en este caso, porque ???.
+2. Se predecirán los valores faltantes ya que superficie y producción parece que sigan una regresión lineal.
+
+Aproximación 1: Mediana.
+
+Se calcula la mediana agrupada por campaña y se sustituyen los valores faltantes.
+```{r}
+train_superficie_mediana <- train_superficie %>% group_by(CAMPANA) %>% mutate(SUPERFICIE = ifelse(is.na(SUPERFICIE), median(SUPERFICIE, na.rm=TRUE), SUPERFICIE)) %>% ungroup()
+plot(density(train_superficie$SUPERFICIE, na.rm=TRUE))
+
+train_superficie_mediana %>%
+  ggplot(aes(ID_FINCA, SUPERFICIE)) +
+  geom_point()
+# train_superficie_mediana_zona <- train_superficie %>% group_by(ID_ZONA) %>% mutate(SUPERFICIE = ifelse(is.na(SUPERFICIE), median(SUPERFICIE, na.rm=TRUE), SUPERFICIE)) %>% ungroup()
+# train_superficie_mediana_zona %>%
+#   ggplot(aes(ID_FINCA, SUPERFICIE)) +
+#   geom_point()
+
+```
+
+Observamos la relación entre superficie y producción, y hacemos la comparación entre la superficie original, la superficie con valores faltantes, y la superficie con los valores faltantes reemplazados por la mediana agrupada por campaña.
+
+```{r}
+#  Superficie original
+train %>% filter(CAMPANA!=22) %>%
+  ggplot(aes(PRODUCCION, SUPERFICIE)) +
+  geom_point()
+
+# Superficie con valores faltantes
+train_superficie %>% filter(CAMPANA!=22) %>%
+  ggplot(aes(PRODUCCION, SUPERFICIE)) +
+  geom_point()
+
+# Superficie con los valores faltantes sustituidos por la mediana agrupada por campaña.
+train_superficie_mediana %>% filter(CAMPANA!=22) %>%
+  ggplot(aes(PRODUCCION, SUPERFICIE)) +
+  geom_point()
+
+# train_superficie_mediana_zona %>% filter(CAMPANA!=22) %>%
+#   ggplot(aes(PRODUCCION, SUPERFICIE)) +
+#   geom_point()
+```
+
+Aproximación 2: regresión lineal.
+
+Predecimos los valores faltantes de superficie con una regresión lineal.
+
+```{r}
+# Creamos un id para poder separar los datos en entrenamiento y test
+train_superficie_id <- tibble::rowid_to_column(train_superficie, "id")
+
+# establecemos una semilla
+set.seed(450)
+
+# Separamos los datos en entrenamiento (70% de los datos) y test (30% de los datos) de aquellos datos que no contengan valores faltantes en superficie
+train_superficie.train <- train_superficie_id %>% filter(!is.na(SUPERFICIE)) %>% sample_n(6720)  %>% arrange(id)
+train_superficie.test <- train_superficie_id %>% filter((!is.na(SUPERFICIE))&(!id%in%train_superficie.train$id)) %>% arrange(id)
+
+# Hacemos un modelo lm sencillo prediciendo la superficie en funcion de produccion
+lm1 <- lm(SUPERFICIE~PRODUCCION,train_superficie.train)
+summary(lm1)
+
+# Obtenemos las superficies de los valores faltantes tras predecir con el modelo
+pred <- predict(lm1,train_superficie.test)
+
+# Observamos el valor de RSME obtenido
+rmse <- sqrt(mean((train_superficie.test$SUPERFICIE-pred)^2))
+
+# Sustituimos los valores de la predicción por los valores faltantes en los datos
+train_superficie_regresion <- train_superficie %>% mutate(SUPERFICIE=ifelse(is.na(SUPERFICIE),predict(lm1,.),SUPERFICIE))
+
+# Se quedan 2 filas con superficie faltante y sustituimos esos 2 datos por la media agrupada por campaña
+# ???comprobar con plots que tienen una superficie parecida entre cada año
+train_superficie_regresion_mediana <- train_superficie_regresion %>% group_by(CAMPANA) %>% mutate(SUPERFICIE = ifelse(is.na(SUPERFICIE), median(SUPERFICIE, na.rm=TRUE), SUPERFICIE)) %>% ungroup()
+
+# Observamos los resultados
+train_superficie_regresion_mediana %>%
+  ggplot(aes(ID_FINCA, SUPERFICIE)) +
+  geom_point()
+```
+
+Como observamos, los valores faltantes se han integrado con las superficies calculadas como la media agrupada por finca.
+
+Observamos el gráfico de la superficie en comparación con la producción.
+```{r}
+train_superficie_regresion_mediana %>% filter(CAMPANA!=22) %>%
+  ggplot(aes(PRODUCCION, SUPERFICIE)) +
+  geom_point()
+```
+
+Comparamos ambas aproximaciones:
+
+```{r}
+train_superficie_mediana %>% filter(CAMPANA!=22) %>%
+  ggplot(aes(PRODUCCION, SUPERFICIE)) +
+  geom_point()
+
+# train_superficie_mediana_zona %>% filter(CAMPANA!=22) %>%
+#   ggplot(aes(PRODUCCION, SUPERFICIE)) +
+#   geom_point()
+
+train_superficie_regresion_mediana %>% filter(CAMPANA!=22) %>%
+  ggplot(aes(PRODUCCION, SUPERFICIE)) +
+  geom_point()
+```
+
+La aproximación 2 (regresión lineal) queda mejor integrada con el resto de valores de superficie. ???
+
+```{r}
+train_superficie_mediana %>%
+  ggplot(aes(ID_FINCA, SUPERFICIE)) +
+  geom_point()
+
+# train_superficie_mediana_zona %>%
+#   ggplot(aes(ID_FINCA, SUPERFICIE)) +
+#   geom_point()
+
+train_superficie_regresion_mediana %>%
+  ggplot(aes(ID_FINCA, SUPERFICIE)) +
+  geom_point()
+```
+
+Del mismo modo, la aproximación 2 (regresión lineal) ???...
+
+
+### 2.3.1. Guardar datasets
+
+Ahora realizaremos unas combinaciones para guardar los datasets para probar a entrenar con las diferentes posibilidades.
+
+```{r}
+#Guardamos los datos para experimentar con train con SUPERFICIE arreglado
+# train
+write.table(
+  train_superficie_regresion_mediana,
+  "train_train_superficie.txt",
+  sep=",",
+  dec=".",
+  row.names=FALSE)
+# test
+write.table(
+  train_superficie_regresion_mediana, #%>% select(CAMPANA==22),
+  "train_test_superficie.txt",
+  sep=",",
+  dec=".",
+  row.names=FALSE)
+```
+
+```{r}
+#Guardamos los datos para experimentar con train con SUPERFICIE arreglado pero haciéndole el logaritmo
+# train
+write.table(
+  train_superficie_regresion_mediana %>% mutate(SUPERFICIE=log(SUPERFICIE)), #%>% select(CAMPANA!=22),
+  "train_train_logsuperficie.txt",
+  sep=",",
+  dec=".",
+  row.names=FALSE)
+
+# test
+write.table(
+  train_superficie_regresion_mediana %>% mutate(SUPERFICIE=log(SUPERFICIE)), #%>% select(CAMPANA==22),
+  "train_test_logsuperficie.txt",
+  sep=",",
+  dec=".",
+  row.names=FALSE)
+```
+
+
+```{r}
+# # Añadimos una columna que sea 1 si la producción aumenta con respecto del año anterior y 0 en caso contrario
+trains <- train_superficie_regresion_mediana %>% mutate(PRODUCCION=ifelse(is.na(PRODUCCION), 'KEEP',PRODUCCION)) %>% spread(CAMPANA, PRODUCCION)
+trains_dif <- trains %>% group_by(ID_FINCA, ID_ZONA) %>%
+  mutate(`14`=as.numeric(`14`)) %>%
+  mutate(`15`=as.numeric(`15`)) %>%
+  mutate(`16`=as.numeric(`16`)) %>%
+  mutate(`17`=as.numeric(`17`)) %>%
+  mutate(`18`=as.numeric(`18`)) %>%
+  mutate(`19`=as.numeric(`19`)) %>%
+  mutate(`20`=as.numeric(`20`)) %>%
+  mutate(`21`=as.numeric(`21`)) %>%
+  mutate(DIFERENCIA_14 = NA) %>%
+  mutate(DIFERENCIA_15 = `15`-`14`) %>%
+  mutate(DIFERENCIA_16 = `16`-`15`) %>%
+  mutate(DIFERENCIA_17 = `17`-`16`) %>%
+  mutate(DIFERENCIA_18 = `18`-`17`) %>%
+  mutate(DIFERENCIA_19 = `19`-`18`) %>%
+  mutate(DIFERENCIA_20 = `20`-`19`) %>%
+  mutate(DIFERENCIA_21 = `21`-`20`) %>%
+  mutate(DIFERENCIA_22 = NA) %>%
+  gather(c(`14`, `15`, `16`, `17`, `18`, `19`, `20`, `21`, `22`), key=CAMPANA, value=PRODUCCION, na.rm=TRUE) %>%
+  gather(c(DIFERENCIA_14, `DIFERENCIA_15`, `DIFERENCIA_16`, `DIFERENCIA_17`, `DIFERENCIA_18`, `DIFERENCIA_19`, `DIFERENCIA_20`, `DIFERENCIA_21`, `DIFERENCIA_22`), key=CAMPANA_DIFERENCIA, value=DIFERENCIA_PREDICCION) %>% separate(CAMPANA_DIFERENCIA, into=c('descartar', 'CAMPANA_DIF'), sep='_') %>% select(!descartar) 
+trains_dif_coincide <- trains_dif[trains_dif$CAMPANA_DIF == trains_dif$CAMPANA, ] %>%
+  mutate(PRODUCCION=ifelse(PRODUCCION=='KEEP', NA, PRODUCCION))
+
+# # Guardamos train añadiendo la columna diferencia con el año anterior
+write.table(
+  trains_dif_coincide,
+  "train_col_dif.txt",
+  sep=",",
+  dec=".",
+  row.names=FALSE)
+
+# # Train con las dos columnas: diferencia y si incrementa o no
+trains_dif_incrementa <- trains_dif_coincide %>% mutate(INCREMENTA = ifelse(DIFERENCIA_PREDICCION>=0, 1, 0))
+write.table(
+  trains_dif_incrementa,
+  "train_col_dif_incrementa.txt",
+  sep=",",
+  dec=".",
+  row.names=FALSE)
+
+# # Guardamos solamente la columna si incrementa o no
+trains_incrementa <- trains_dif_coincide %>% mutate(INCREMENTA = ifelse(DIFERENCIA_PREDICCION>=0, 1, 0)) %>% select(!DIFERENCIA_PREDICCION)
+write.table(
+  trains_incrementa,
+  "train_col_incrementa.txt",
+  sep=",",
+  dec=".",
+  row.names=FALSE)
+```
+
+```{r}
+# Guardamos la producción del año anterior
+trains <- train_superficie_regresion_mediana %>% mutate(PRODUCCION=ifelse(is.na(PRODUCCION), 'KEEP',PRODUCCION)) %>% spread(CAMPANA, PRODUCCION)
+trains_anterior <- trains %>% mutate(CAMPANA_14 = NA) %>%
+  mutate(CAMPANA_15 = `14`) %>%
+  mutate(CAMPANA_16 = `15`) %>%
+  mutate(CAMPANA_17 = `16`) %>%
+  mutate(CAMPANA_18 = `17`) %>%
+  mutate(CAMPANA_19 = `18`) %>%
+  mutate(CAMPANA_20 = `19`) %>%
+  mutate(CAMPANA_21 = `20`) %>%
+  mutate(CAMPANA_22 = `21`) %>%
+  gather(c(`14`, `15`, `16`, `17`, `18`, `19`, `20`, `21`, `22`), key=CAMPANA, value=PRODUCCION, na.rm=TRUE) %>%
+  gather(c(CAMPANA_14, `CAMPANA_15`, `CAMPANA_16`, `CAMPANA_17`, `CAMPANA_18`, `CAMPANA_19`, `CAMPANA_20`, `CAMPANA_21`, `CAMPANA_22`), key=CAMPANA_ANTERIOR, value=PRODUCCION_ANTERIOR) %>% separate(CAMPANA_ANTERIOR, into=c('descartar', 'CAMPANA_ANT'), sep='_') %>% select(!descartar) 
+
+trains_anterior_coincide <- trains_anterior[trains_anterior$CAMPANA_ANT == trains_anterior$CAMPANA, ] %>%
+  mutate(PRODUCCION=ifelse(PRODUCCION=='KEEP', NA, PRODUCCION)) %>% select(!CAMPANA_ANT)
+
+write.table(
+  trains_anterior_coincide,
+  "train_col_prod_anterior.txt",
+  sep=",",
+  dec=".",
+  row.names=FALSE)
+```
+
+## 2.4. Análisis WindDirection
+
+```{r}
+meteo_campana <- meteo %>% mutate(CAMPANA = case_when(month(date)<=6 ~ as.numeric(year(date)),
+                                          month(date)>6 ~ as.numeric(year(date))+1)) %>%
+                mutate(CAMPANA = as.character(CAMPANA)) %>% 
+                mutate(CAMPANA = as.factor(str_sub(CAMPANA, -2, -1)))
+
+meteo_campana %>% 
+  ggplot(aes(CAMPANA, year(date))) +
+  geom_point()
+```
+
+```{r}
+# Reemplazamos en las variables numéricas de cada uno de los dataframe los datos faltates. 
+meteo_na <- meteo_campana %>%
+            group_by(ID_ESTACION, month(date)) %>%
+            mutate_if(is.numeric, function(x) ifelse(is.na(x),
+                                            mean(x, na.rm = TRUE),
+                                            x)) %>% select(!date) %>% ungroup()
+
+# Eliminamos la variable generada por la agrupación month(date)
+meteo_na <- meteo_na[-1]
+```
+
+# 2. Tratamiento sobre los datasets de los datos
+
+## 2.2 Transformación de variables
+
+### 2.2.1 Selección de variables de meteo
+
+Los datos de `eto` contienen información horaria agregada y transformada de las estaciones climatológicas de The Weather Company por contenidas en `meteo`. Este último dataset dispone de numerosas variables meteorológicas detalladas de la última hora, las últimas 6 horas, las últimas 24 horas, etc., haciendo que `eto` sea un resumen de los periodos con el siguiente patrón: 'Variable + "Local" + periodo + tipo de agregación'.
+
+???Primero veamos qué variables tienen en común:
+
+```{r}
+intersect(names(eto), names(meteo))
+```
+
+Las variables que no están contenidas en el dataset `eto` son las siguientes:
+
+pressureChange, pressureMeanSeaLevel, windDirection , windGust
+
+Por lo tanto, nos quedaremos solo con esas:
+
+```{r}
+meteo <- meteo %>% select(c(date, ID_ESTACION, pressureChange, pressureMeanSeaLevel, windDirection))
+```
+
+### 2.2.2 Variable campaña en eto y meteo
+
+El invierno de un año afectará al año siguiente, por lo tanto los datos relativos a partir de junio de ese año formarán parte de la campaña del año siguiente. Por lo tanto, construimos la variable `CAMPANA` en `eto` siendo que las variables meteorológicas de un año de campaña son los recogidos a partir del 1 de julio de ese año, hasta el 30 de junio del año siguiente. De este modo se podrá unir más adelante por la variable `CAMPANA` y `ID_ESTACION`, ya que los datos de `train` son los datos relativos a la campaña de cada año.
+
+Creamos una variable que sea el año de la producción afectada, es decir, la campaña:
+
+
+```{r}
+# A partir de la nueva variable de CAMPANA podremos unir estos datos con train 
+etoc <- eto %>% mutate(CAMPANA = case_when(month(date)<=6 ~ as.numeric(year(date)),
+                                          month(date)>6 ~ as.numeric(year(date))+1)) %>%
+                mutate(CAMPANA = as.character(CAMPANA)) %>% 
+                mutate(CAMPANA = as.factor(str_sub(CAMPANA, -2, -1)))
+```
+
+Procedemos a hacer la misma operación con los datos de `meteo`:
+
+```{r}
+# A partir de la  nueva variable de CAMPANA podremos unir estos datos con train 
+meteoc <- meteo %>% mutate(CAMPANA = case_when(month(date)<=6 ~ as.numeric(year(date)),
+                                          month(date)>6 ~ as.numeric(year(date))+1)) %>%
+                mutate(CAMPANA = as.character(CAMPANA)) %>% 
+                mutate(CAMPANA = as.factor(str_sub(CAMPANA, -2, -1)))
+```
+
+### 2.2.3 Corrección de la variable date en eto
+
+Una vez creada la variable CAMPAÑA en los datos de eto, al existir los datos para los días 29 y 30 de Junio de 2015, esos días se considerarán como los únicos de la campaña 15. Al no ser representativo únicamente 2 días de todo un año, eliminaremos esas filas.
+
+```{r}
+etoc <- etoc %>% filter(date!='2015-06-29', date!='2015-06-30')
+```
+
+###  2.2.4 Transformación de la dirección del viento windDirection
+
+Cuando se trabaja con la dirección del viento, es común representarlo como un ángulo medido en grados. Sin embargo, cuando se usa la dirección del viento como una característica para un modelo de aprendizaje automático, a menudo es mejor transformarlo usando la función seno y coseno.
+
+La razón de esto es que la dirección del viento es de naturaleza circular, lo que significa que los valores más altos y más bajos están conectados. Por ejemplo, una dirección del viento de 360 grados es equivalente a una dirección del viento de 0 grados. Esta circularidad puede crear problemas al usar la dirección del viento como una característica en un modelo lineal, ya que asume que los valores están relacionados linealmente.
+
+Al transformar la dirección del viento usando la función coseno, puede capturar la circularidad de la variable. Las funciones seno y coseno devuelven un valor entre -1 y 1, con los valores más altos en 0 grados (o 360 grados) y los valores más bajos en 180 grados. Esta transformación puede mejorar el rendimiento de su modelo haciéndolo más resistente a la naturaleza circular de la dirección del viento.
+
+```{r}
+meteoc <- meteoc %>% mutate(
+  # Codificación de windDirection
+  direccion_viento_radianes = windDirection*pi/180,
+  # Transformar en seno y coseno
+  windDirection_sen = sin(direccion_viento_radianes),
+  windDirection_cos = cos(direccion_viento_radianes)) %>% 
+  select(-c(windDirection, direccion_viento_radianes))
+```
+
+## 2.3 Limpieza de NA
+
+### 2.3.1 Variables con muchos valores faltantes en eto
+
+Hay variables meteorológicas que solo se han tomado durante el año 2022 que fue el último año, y otras que se han tomado todos los años menos en 2014 que fue el primero.
+
+```{r}
+threshold <- 0.5
+n <- nrow(etoc)
+non_missing_counts <- sapply(etoc, function(x) sum(!is.na(x)))
+vars_to_keep <- names(etoc)[non_missing_counts / n >= threshold]
+
+# seleccionar las variables que contentan un 50% de valores faltantes
+etoc <- etoc[, ..vars_to_keep]
+```
+
+### 2.3.2 Valores faltantes de los datos meteorológicos
+
+Reemplazamos los valores faltantes por los valores de la media por estación y por mes de cada variable para que no se le de importancia a esos valores faltantes.
+
+```{r message=FALSE, warning=FALSE}
+etoc <- etoc %>% mutate(across(matches('UVIndex'), round))
+
+# Convertimos la variable UVIndex a factor provisionalmente para después sustituir sus valores por la moda en lugar de la media
+etoc <- etoc %>% mutate(across(matches('UVIndex'), as.factor))
+
+# Reemplazamos en las variables numéricas de cada uno de los dataframe los datos faltates. 
+etoc <- etoc %>%
+            group_by(ID_ESTACION, month(date)) %>%
+            mutate_if(is.numeric, function(x) ifelse(is.na(x),
+                                            mean(x, na.rm = TRUE),
+                                            x)) %>% ungroup()
+meteoc <- meteoc %>%
+            group_by(ID_ESTACION, month(date)) %>%
+            mutate_if(is.numeric, function(x) ifelse(is.na(x),
+                                            mean(x, na.rm = TRUE),
+                                            x)) %>% select(!date) %>% ungroup()
+
+# Reemplazamos en UVIndex numéricas de eto los datos faltates. 
+etoc <- etoc %>%
+            group_by(ID_ESTACION, month(date)) %>%
+            mutate(across(matches('UVIndex'), function(x) ifelse(is.na(x),
+                                            mode(x, na.rm = TRUE),
+                                            x))) %>% select(!date) %>% ungroup()
+
+# Volvemos a transformar el tipo de variable para UVIndex a numérico
+etoc <- etoc %>% mutate(across(matches('UVIndex'), as.numeric))
+
+# Eliminamos la variable generada por la agrupación month(date)
+etoc <- etoc[,-213]
+meteoc <- meteoc[,-7]
+
+# Comprobamos que no nos quedamos con los NA
+sum(is.na(etoc))
+sum(is.na(meteoc))
+```
+
+### 2.3.3 Valores faltantes de la variable Superficie
+
+La variable Superficie tiene valores 0 en los perimeros años de campaña, ya que no se disponen datos de la Superficie y viene representado con un '0' en lugar de con NA. Ya que la superficie de los años que sí se dispone presenta pocas diferencias entre los diferentes años de campaña, asumiremos que la superficie es la misma durante todos los años y completaremos los valores faltantes con la media agrupada por Finca.
+
+Primero sustituimos los valores 0 por Na:
+
+```{r}
+train <- train %>% mutate(across(.cols = SUPERFICIE,
+                           .fns = ~ifelse(.x == 0, NA, .x))) 
+```
+
+Para reemplazar los valores faltantes, los sustituimos por la media agrupada por Finca:
+
+```{r}
+train_superficie <- train %>%
+  group_by(ID_FINCA) %>%
+  mutate(SUPERFICIE = ifelse(is.na(SUPERFICIE), mean(SUPERFICIE, na.rm=TRUE), SUPERFICIE)) %>% ungroup()
+```
+
+Como hay Fincas que no tienen valor de superficie en ningún caso, es decir, no existe ninguna fila para la cual ese identificador de finca tenga al menos un valor de superficie, debemos completar esos valores faltantes. Para realizar esa tarea, se predecirán los valores faltantes ya que superficie y producción parece que sigan una regresión lineal.
+
+```{r}
+# Creamos un id para poder separar los datos en entrenamiento y test
+train_superficie_id <- tibble::rowid_to_column(train_superficie, "id")
+
+# establecemos una semilla
+set.seed(450)
+
+# Separamos los datos en entrenamiento (70% de los datos) y test (30% de los datos) de aquellos datos que no contengan valores faltantes en superficie
+train_superficie.train <- train_superficie_id %>% filter(!is.na(SUPERFICIE)) %>% sample_n(6720)  %>% arrange(id)
+train_superficie.test <- train_superficie_id %>% filter((!is.na(SUPERFICIE))&(!id%in%train_superficie.train$id)) %>% arrange(id)
+
+# Hacemos un modelo lm sencillo prediciendo la superficie en funcion de produccion
+lm1 <- lm(SUPERFICIE~PRODUCCION,train_superficie.train)
+summary(lm1)
+
+# Obtenemos las superficies de los valores faltantes tras predecir con el modelo
+pred <- predict(lm1,train_superficie.test)
+
+# Observamos el valor de RSME obtenido
+rmse <- sqrt(mean((train_superficie.test$SUPERFICIE-pred)^2))
+
+# Sustituimos los valores de la predicción por los valores faltantes en los datos
+train_superficie_regresion <- train_superficie %>% mutate(SUPERFICIE=ifelse(is.na(SUPERFICIE),predict(lm1,.),SUPERFICIE))
+
+# Se quedan 2 filas con superficie faltante y sustituimos esos 2 datos por la media agrupada por campaña
+train <- train_superficie_regresion %>% group_by(CAMPANA) %>% mutate(SUPERFICIE = ifelse(is.na(SUPERFICIE), median(SUPERFICIE, na.rm=TRUE), SUPERFICIE)) %>% ungroup()
+
+# Eliminamos las variables que ya no son necesarias
+```
+
+# 3. Unión de train, eto y meteo
+
+Como se ha visto en el script `exploratory.rmd` en el análisis exploratorio, la media, el máximo y el mínimo de las variables de ETO están muy correlacionadas entre ellas. Además, los estadísticos de máximo y mínimo no son estadísticos robustos, de modo que solamente se seleccionan las medias (Avg). 
+
+Por otra parte, se selecciona en específico la variable Day, que es la media resultante de las 24 horas del día, y por tanto es la media de la información recogida del resto de franjas horarias ( Daytime, Nighttime, Morning, Afternoon, Evening y Overnight). También se seleccionan las variables Nighttime, ya que podrían ser importantes porque durante la noche es cuando ocurren los cambios meteorológicos más radicales. Por ejemplo, si ocurren fuertes nevadas durante la noche, la producción podría verse perjudicada.
+
+
+```{r}
+# Transformamos temporalmente a factor la variable UVIndex
+etoc_factor <- etoc %>% mutate(across(matches('UVIndex'), as.factor))
+
+# Agrupamos haciendo la media a las variables numéricas
+avgeto_num <- etoc_factor %>% select(CAMPANA, ID_ESTACION, matches(("DayAvg|NighttimeAvg"))) %>% group_by(ID_ESTACION, CAMPANA) %>% summarise_if(is.numeric, mean)
+
+# Creamos una función para agrupar por la moda a las variables de UVIndex
+mode <- function(codes){
+  which.max(tabulate(codes))
+}
+
+# Agrupamos por la moda a las variables de UVIndex
+avgeto_UVIndex <- etoc_factor %>% select(CAMPANA, ID_ESTACION, matches(("DayAvg|NighttimeAvg"))) %>% group_by(ID_ESTACION, CAMPANA) %>% summarise(across(matches('UVIndex'), mode))
+
+# Unimos las variables numéricas y las variables de UVIndex
+avgeto <- left_join(avgeto_num, avgeto_UVIndex, by=c('ID_ESTACION','CAMPANA'))
+```
+
+Unimos los datos agregados de `eto` a los datos de `train` por CAMPAÑA y por ID_ESTACION.
+
+```{r}
+traineto <- left_join(train, avgeto, by=c('ID_ESTACION','CAMPANA')) 
+```
+
+Para agrupar `meteo` realizaremos el mismo procedimiento pero quedándonos solamente con las agregaciones de las medias de las variables.
+
+```{r}
+avgmeteo <- meteoc %>% group_by(CAMPANA, ID_ESTACION) %>% summarise(across(.fns=mean))
+```
+
+Finalmente unimos todos los datos:
+
+```{r}
+trainetometeo <- left_join(traineto, avgmeteo, by=c('ID_ESTACION', 'CAMPANA'))
+```
+
+# 4. Split de train y test
+
+Separamos los datos de trainetometeo; test aquellas con \`PRODUCCION\` faltante, y train en el caso contrario, ya que es el año de campaña que queremos predecir (la campaña 22).
+
+Antes de realizar la normalización, como en las variables con campaña 14 y 15 no disponen de datos meteorológicos, se ha decidido eliminar esas observaciones. 
+
+También se ha decidido eliminar la variable ALTITUD porque además de que es una variable que representa rangos, existe una gran cantidad de observaciones para las cuales no tienen altitud. Por otro lado, se ha decidido eliminar la variable campaña para el entrenamiento de los modelos. Una de las razones principales es que no es correcto tratarla como una variable categórica, puesto que el conjunto de test no habría visto nunca observaciones con ese tipo de campaña.
+
+```{r}
+# Antes de separar en train y test debemos quitar campaña y altitud que no vamos a utilizar 
+trainetometeo_test <- trainetometeo %>% 
+  filter(CAMPANA==22) %>% 
+  select(-c(CAMPANA, ALTITUD))
+
+trainetometeo_train <- trainetometeo %>% 
+  filter(CAMPANA!=15 & CAMPANA!=14 & CAMPANA!=22)%>% 
+  select(-c(CAMPANA, ALTITUD))
+
+rm(trainetometeo)
+```
+
+```{r}
+# # Descarga de los datos unidos 
+# write.table(
+#   trainetometeo_train, 
+#   "trainetometeo_train.txt", 
+#   sep=",", 
+#   dec=".", 
+#   row.names=FALSE)
+# 
+# write.table(
+#   trainetometeo_test, 
+#   "trainetometeo_test.txt", 
+#   sep=",", 
+#   dec=".", 
+#   row.names=FALSE)
+```
+
+Finalmente unimos todos los datos:
+
+```{r}
+trainetometeo <- left_join(traineto, avgmeteo, by=c('ID_ESTACION', 'CAMPANA'))
+```
+
+
+# 5. Normalización y estandarización de los datos
+
+Normalizar los datos antes de calcular la correlación de variables ayuda a garantizar que todas las variables tengan el mismo peso en la correlación y que los resultados sean más precisos y significativos. Además, la normalización de los datos puede ayudar a prevenir la presencia de valores atípicos o errores en los datos que puedan afectar la correlación.
+
+La normalización de los datos, por otro lado, permite comparar y analizar diferentes variables en una misma escala y minimiza el impacto de la variabilidad de las unidades de medida en las diferentes variables. La normalización también puede mejorar la interpretación y la precisión de los modelos de predicción. 
+
+Veamos la distribución de nuestros datos:
+
+## 5.1. Distribuciones
+
+*¿Para que sirve la distribución de los datos?*: La distribución de los datos es un factor importante a considerar al realizar la normalización de datos. La normalización es un proceso en el que los datos se ajustan para tener una distribución específica que permite comparar diferentes conjuntos de datos de manera más efectiva.
+
+En particular, cuando los datos no tienen una distribución normal (también conocida como distribución Gaussiana), la normalización puede ayudar a hacer que los datos sean más comparables. La normalización se utiliza a menudo en aplicaciones estadísticas y de aprendizaje automático para asegurar que los datos estén en una escala común y que los resultados de los análisis no estén influenciados por las diferencias de escala.
+
+En resumen, la normalización se utiliza para hacer que los datos sean más comparables y, en general, puede ser más efectiva cuando los datos tienen una distribución no normal, por lo que la distribución de los datos es un factor importante a considerar.
+
+Veamos la distribución de nuestros datos:
+
+```{r función distribuciones}
+library(cowplot)
+# Definir función para crear una cuadrícula de gráficos de densidad
+create_density_grid <- function(df, cols, ncol) {
+  # Crear una lista vacía para almacenar los gráficos
+  plot_list <- list()
+  
+  # Iterar sobre las columnas y crear los gráficos de densidad
+  for (i in colnames(df)[cols]) {
+    plot <- ggplot(df, aes(x = .data[[i]])) + 
+      geom_density() +
+      labs(title = i)  # Utilizar el nombre de la columna como título del gráfico
+    plot_list[[i]] <- plot  # Añadir el gráfico a la lista
+  }
+  # Combinar los gráficos en una cuadrícula utilizando la función plot_grid() de cowplot
+  plot_grid(plotlist = plot_list, ncol = ncol)}
+```
+
+```{r visualización distribuciones}
+# Ejemplo de uso: crear una cuadrícula de gráficos de densidad para las columnas 2 a 10, con 3 columnas por fila
+create_density_grid(trainetometeo_train, 4:10, 3)
+create_density_grid(trainetometeo_train, 10:18, 3)
+create_density_grid(trainetometeo_train, 19:27, 3)
+create_density_grid(trainetometeo_train, 28:31, 3)
+```
+
+
+Como podemos observar, las variables UVIndexLocalDayAvg y UVIndexLocalNightimeAvg tienen una distribución vacía en los gráficos. Esto es debido a que tienen varianza 0, ya que la mayoría de los valores de esas dos variables toman el mismo valor. Estas dos variables no nos dirán información y por lo tanto las eliminaremos del conjunto de datos.
+
+```{r}
+trainetometeo_train <- trainetometeo_train %>% select(-c(UVIndexLocalDayAvg, UVIndexLocalNighttimeAvg))
+trainetometeo_test <- trainetometeo_test %>% select(-c(UVIndexLocalDayAvg, UVIndexLocalNighttimeAvg))
+```
+
+*¿Qué normalización se tiene que utilizar si los datos meteorológicos siguen una normal?*: Si los datos meteorológicos siguen una distribución normal, entonces se puede utilizar la normalización estándar o Z-score para estandarizar los datos. La normalización Z-score transforma los datos de manera que tengan una media de cero y una desviación estándar de uno. Esto permite comparar los valores de diferentes variables meteorológicas que pueden tener diferentes unidades de medida.
+
+*¿Por qué hacer estandarización y normalización de los datos si podemos realizarle el logaritmo a la variable para forzalo a una normal?*: Aplicar el logaritmo a las variables que no siguen una distribución normal para aplicar una normalización al conjunto de datos puede ser útil en algunos casos, especialmente si la distribución de los datos es muy sesgada. 
+
+Por lo tanto, 
+-  Distribuciones normales: normalización Z-score para estandarizar los datos.
+-  Distribuciones que no siguen una normal: Trasformacion logaritmica + normalización Z-score
+
+Las variables que no siguen una distribución normal son RelativeHumidity, SUPERFICIE y PRODUCCION por lo tanto para realizar la correlación aplicamos la transformación logaritmo a dichas variables. Nos vamos a quedar con dos conjuntos de datos, por un lado con el logaritmo de la PRODUCCION y otro sin a ver como afecta esta transformación a los datos.
+
+Realizamos la normalización de los datos:
+
+```{r}
+# Aplicamos el logaritmo a las variables requeridas
+## trainetometeo log RelativeHumidity|SUPERFICIE|PRODUCCION 
+trainetometeo_train_log_norm <- trainetometeo_train %>% 
+  mutate(across(matches("RelativeHumidity|SUPERFICIE|PRODUCCION"), ~log(.))) 
+trainetometeo_test_log_norm <- trainetometeo_test %>% 
+  mutate(across(matches("RelativeHumidity|SUPERFICIE|PRODUCCION"), ~log(.)))
+
+##  trainetometeo sin log en PRODUCCION
+trainetometeo_train_norm <- trainetometeo_train %>% 
+  mutate(across(matches("RelativeHumidity|SUPERFICIE"), ~log(.))) 
+trainetometeo_test_norm <- trainetometeo_test %>% 
+  mutate(across(matches("RelativeHumidity|SUPERFICIE"), ~log(.)))
+
+# Normalización de los datos de trainetometeo con Z-score
+mean_sd_log <- trainetometeo_train_log_norm %>%
+    reframe(across(where(is.numeric),  ~ c(mean(., na.rm = TRUE), 
+            sd(., na.rm = TRUE))))
+mean_sd <- trainetometeo_train_norm %>%
+    reframe(across(where(is.numeric),  ~ c(mean(., na.rm = TRUE), 
+            sd(., na.rm = TRUE))))
+
+f1 <- function(x, y) (x -y[1])/y[2]
+list2env(map(lst(trainetometeo_train_log_norm, trainetometeo_test_log_norm), ~  {
+   .x[names(mean_sd_log)] <- map2(select(.x, names(mean_sd_log)), mean_sd_log, f1)
+         .x}), .GlobalEnv)
+
+list2env(map(lst(trainetometeo_train_norm, trainetometeo_test_norm), ~  {
+   .x[names(mean_sd)] <- map2(select(.x, names(mean_sd)), mean_sd, f1)
+         .x}), .GlobalEnv)
+```
+
+
+## 5.2. Prueba datos trainetometeo_train_log_norm
+
+
+```{r}
+trainetometeo_train_log_norm <- trainetometeo_train %>% 
+  mutate(across(matches("RelativeHumidity|SUPERFICIE|PRODUCCION"), ~log(.))) 
+trainetometeo_test_log_norm <- trainetometeo_test %>% 
+  mutate(across(matches("RelativeHumidity|SUPERFICIE|PRODUCCION"), ~log(.)))
+
+
+trainetometeo_train_norm_SINLOGSUPERFICIE <- trainetometeo_train %>% 
+  mutate(across(matches("RelativeHumidity"), ~log(.))) # |SUPERFICIE
+trainetometeo_test_norm_SINLOGSUPERFICIE <- trainetometeo_test %>% 
+  mutate(across(matches("RelativeHumidity"), ~log(.))) # |SUPERFICIE
+
+
+# Normalizacion de los datos de train con Z-score
+mean_sd_log <- trainetometeo_train_log_norm %>%
+    reframe(across(where(is.numeric),  ~ c(mean(., na.rm = TRUE), 
+            sd(., na.rm = TRUE))))
+
+f1 <- function(x, y) (x -y[1])/y[2]
+
+list2env(map(lst(trainetometeo_train_log_norm, trainetometeo_test_log_norm), ~  {
+   .x[names(mean_sd_log)] <- map2(select(.x, names(mean_sd_log)), mean_sd_log, f1)
+         .x}), .GlobalEnv)
+```
+
+## 5.3. Prueba datos trainetometeo_train_norm_temp
+
+```{r}
+# Descarga de datos unidos solo por train + Temperatura NORMALIZADOS
+train_train_norm_temp <- trainetometeo_train_norm %>% 
+  select(ID_FINCA, ID_ZONA, ID_ESTACION,
+         VARIEDAD, MODO, TIPO, COLOR, SUPERFICIE, PRODUCCION, TemperatureLocalDayAvg,
+         TemperatureLocalNighttimeAvg)
+
+train_train_norm_tempwindSINTIPO <- trainetometeo_train_norm %>% 
+  select(ID_FINCA, ID_ZONA, ID_ESTACION,
+         VARIEDAD, MODO, COLOR, SUPERFICIE, PRODUCCION, TemperatureLocalDayAvg,
+         TemperatureLocalNighttimeAvg, WindSpeedLocalDayAvg)
+
+train_train_norm_tempwindhum <- trainetometeo_train_norm %>% 
+  select(ID_FINCA, ID_ZONA, ID_ESTACION,
+         VARIEDAD, MODO, TIPO, COLOR, SUPERFICIE, PRODUCCION, TemperatureLocalDayAvg,
+         TemperatureLocalNighttimeAvg, WindSpeedLocalDayAvg, RelativeHumidityLocalDayAvg)
+
+
+# Obtener una lista de variables en común de train y test 
+common_vars <- intersect(names(train_train_norm_temp), names(trainetometeo_test_norm))
+common_vars3 <- intersect(names(train_train_norm_tempwindhum), names(trainetometeo_test_norm))
+common_vars4 <- intersect(names(train_train_norm_tempwindSINTIPO), names(trainetometeo_test_norm))
+
+# Seleccionar variables en común usando select()
+train_test_norm_temp <- select(trainetometeo_test_norm, all_of(common_vars))
+train_test_norm_tempwindhum <- select(trainetometeo_test_norm, all_of(common_vars3))
+train_test_norm_tempwindSINTIPO <- select(trainetometeo_test_norm, all_of(common_vars4))
+
+##
+write.table(
+  train_train_norm_temp,
+  "train_train_norm_temp.txt",
+  sep=",",
+  dec=".",
+  row.names=FALSE)
+
+write.table(
+  train_test_norm_temp,
+  "train_test_norm_temp.txt",
+  sep=",",
+  dec=".",
+  row.names=FALSE)
+
+## train_train_norm_tempwindhum
+write.table(
+  train_train_norm_tempwindhum,
+  "train_train_norm_tempwindhum.txt",
+  sep=",",
+  dec=".",
+  row.names=FALSE)
+
+write.table(
+  train_test_norm_tempwindhum,
+  "train_test_norm_tempwindhum.txt",
+  sep=",",
+  dec=".",
+  row.names=FALSE)
+
+## train_train_norm_tempwindSINTIPO
+write.table(
+  train_train_norm_tempwindSINTIPO,
+  "train_train_norm_tempwindSINTIPO.txt",
+  sep=",",
+  dec=".",
+  row.names=FALSE)
+
+write.table(
+  train_test_norm_tempwindSINTIPO,
+  "train_test_norm_tempwindSINTIPO.txt",
+  sep=",",
+  dec=".",
+  row.names=FALSE)
+```
+
+# 6. Selección de características
+
+## 6.1. Selección de características variables numéricas
+
+### 6.1.1.  Descarga de datos
+
+#### - Normalización sin log(PRODUCCIÓN)
+
+Prueba de la normalización  sin hacer log a PRODUCCIÓN
+
+Hacemos distintas combinaciones de PRODUCCION con los datos normalizados para guardarnos los datasets y realizar pruebas en los modelos
+
+```{r}
+# trainetometeo normalizado con PRODUCCION normalizado y sin el logaritmo
+trainetometeo_train_norm <- trainetometeo_train %>% 
+  mutate(across(matches("RelativeHumidity|SUPERFICIE"), ~log(.))) 
+trainetometeo_test_norm <- trainetometeo_test %>% 
+  mutate(across(matches("RelativeHumidity|SUPERFICIE"), ~log(.))) 
+
+trainetometeo_train_norm_SINLOGSUPERFICIE <- trainetometeo_train %>% 
+  mutate(across(matches("RelativeHumidity"), ~log(.))) # |SUPERFICIE
+trainetometeo_test_norm_SINLOGSUPERFICIE <- trainetometeo_test %>% 
+  mutate(across(matches("RelativeHumidity"), ~log(.))) # |SUPERFICIE
+
+library(purrr)
+mean_sd <- trainetometeo_train_norm %>%
+    reframe(across(where(is.numeric),  ~ c(mean(., na.rm = TRUE), 
+            sd(., na.rm = TRUE))))
+
+f1 <- function(x, y) (x -y[1])/y[2]
+
+list2env(map(lst(trainetometeo_train_norm, trainetometeo_test_norm), ~  {
+   .x[names(mean_sd)] <- map2(select(.x, names(mean_sd)), mean_sd, f1)
+         .x}), .GlobalEnv)
+## 
+mean_sd <- trainetometeo_train_norm_SINLOGSUPERFICIE %>%
+    reframe(across(where(is.numeric),  ~ c(mean(., na.rm = TRUE), 
+            sd(., na.rm = TRUE))))
+
+f1 <- function(x, y) (x -y[1])/y[2]
+
+list2env(map(lst(trainetometeo_train_norm_SINLOGSUPERFICIE, trainetometeo_test_norm_SINLOGSUPERFICIE), ~  {
+   .x[names(mean_sd)] <- map2(select(.x, names(mean_sd)), mean_sd, f1)
+         .x}), .GlobalEnv)
+
+write.table(
+  trainetometeo_train_norm,
+  "trainetometeo_train_norm.txt",
+  sep=",",
+  dec=".",
+  row.names=FALSE)
+
+write.table(
+  trainetometeo_test_norm,
+  "trainetometeo_test_norm.txt",
+  sep=",",
+  dec=".",
+  row.names=FALSE)
+
+write.table(
+  mean_sd,
+  "mean_sd.txt",
+  sep=",",
+  dec=".",
+  row.names=FALSE)
+
+##
+write.table(
+  trainetometeo_train_norm_SINLOGSUPERFICIE,
+  "trainetometeo_train_norm_SINLOGSUPERFICIE.txt",
+  sep=",",
+  dec=".",
+  row.names=FALSE)
+
+write.table(
+  trainetometeo_test_norm_SINLOGSUPERFICIE,
+  "trainetometeo_test_norm_SINLOGSUPERFICIE.txt",
+  sep=",",
+  dec=".",
+  row.names=FALSE)
+
+```
+
+#### - Normalización norm(log(PRODUCCIÓN))
+
+sin hacer log y norm a PRODUCCIÓN
+
+```{r}
+# trainetometeo normalizado con PRODUCCION sin normalizar y sin el logaritmo
+trainetometeo_train_norm_PRODUCCION_NO_NORM <- trainetometeo_train %>% 
+  mutate(across(matches("RelativeHumidity|SUPERFICIE"), ~log(.)))
+trainetometeo_test_norm_PRODUCCION_NO_NORM <- trainetometeo_test %>% 
+  mutate(across(matches("RelativeHumidity|SUPERFICIE"), ~log(.)))
+
+library(purrr)
+
+mean_sd_sin_produccion <- trainetometeo_train_norm_PRODUCCION_NO_NORM %>%
+    reframe(across(where(is.numeric),  ~ c(mean(., na.rm = TRUE), 
+            sd(., na.rm = TRUE)))) %>% select(!PRODUCCION)
+
+f1 <- function(x, y) (x -y[1])/y[2]
+
+list2env(map(lst(trainetometeo_train_norm_PRODUCCION_NO_NORM, trainetometeo_test_norm_PRODUCCION_NO_NORM), ~  {
+   .x[names(mean_sd_sin_produccion)] <- map2(select(.x, names(mean_sd_sin_produccion)), mean_sd_sin_produccion, f1)
+         .x}), .GlobalEnv)
+
+# trainetometeo_train_sin_log_en_produccion
+write.table(
+  trainetometeo_train_norm_PRODUCCION_NO_NORM,
+  "trainetometeo_train_norm_PROD_NO_NORM.txt",
+  sep=",",
+  dec=".",
+  row.names=FALSE)
+
+write.table(
+  trainetometeo_test_norm_PRODUCCION_NO_NORM,
+  "trainetometeo_test_norm_PROD_NO_NORM.txt",
+  sep=",",
+  dec=".",
+  row.names=FALSE)
+```
+
+#### - Normalización + selección
+Descarga de numéricos normalizados y reduciendo características.
+
+```{r}
+# Guardamos el dataset trainetometeo normalizado realizando en PRODUCCION el logarimo y normalizándolo también
+write.table(
+  trainetometeo_train_log_norm,
+  "trainetometeo_train_log_norm.txt",
+  sep=",",
+  dec=".",
+  row.names=FALSE)
+
+write.table(
+  trainetometeo_test_log_norm,
+  "trainetometeo_test_log_norm.txt",
+  sep=",",
+  dec=".",
+  row.names=FALSE)
+
+# Guardamos las medias y las desviaciones estándar de todas las variables
+write.table(
+  mean_sd_log,
+  "data_pruebas/mean_sd_log.txt",
+  sep=",",
+  dec=".",
+  row.names=FALSE)
+
+# Guardamos los datos con temperatura normalizados 
+# Descarga de datos unidos solo por train + Temperatura 
+train_train_log_norm_temp <- trainetometeo_train_log_norm %>% 
+  select(ID_FINCA, ID_ZONA, ID_ESTACION,
+         VARIEDAD, MODO, TIPO, COLOR, SUPERFICIE, PRODUCCION, TemperatureLocalDayAvg,
+         TemperatureLocalNighttimeAvg)
+
+
+# Obtener una lista de variables en común de train y test 
+common_vars <- intersect(names(train_train_log_norm_temp), names(trainetometeo_test_log_norm))
+
+# Seleccionar variables en común usando select()
+train_test_log_norm_temp <- select(trainetometeo_test_log_norm, all_of(common_vars))
+
+write.table(
+  train_train_log_norm_temp, 
+  "train_train_log_norm_temp.txt", 
+  sep=",", 
+  dec=".", 
+  row.names=FALSE)
+
+write.table(
+  train_test_log_norm_temp, 
+  "train_test_log_norm_temp.txt", 
+  sep=",", 
+  dec=".", 
+  row.names=FALSE)
+```
+
+#### - Normalización + correlación
+
+```{r}
+# trainetometeo train sin logaritmo, normalizado, no correlacionadas
+trainetometeo_train_norm_num <- trainetometeo_train_norm %>% select_if(is.numeric)
+trainetometeo_train_norm_num_corr <- trainetometeo_train_norm_num
+trainetometeo_train_norm_nonum <- trainetometeo_train_norm %>% select_if(is.factor)
+trainetometeo_train_norm_noncorr <- cbind(trainetometeo_train_norm_nonum, trainetometeo_train_norm_num_corr)
+
+# Obtener una lista de variables en común de train y test 
+common_vars <- intersect(names(trainetometeo_train_norm_noncorr), names(trainetometeo_test_norm))
+
+# Seleccionar variables en común usando select()
+trainetometeo_test_norm_noncorr <- select(trainetometeo_train_norm, all_of(common_vars))
+
+## Finalmente, según la correlación del df nos quedamos con el siguiente conjunto de datos de train y test:
+write.table(
+  trainetometeo_train_norm_noncorr, 
+  "data_pruebas/trainetometeo_train_norm_noncorr.txt", 
+  sep=",", 
+  dec=".", 
+  row.names=FALSE)
+
+write.table(
+  trainetometeo_test_norm_noncorr, 
+  "data_pruebas/trainetometeo_test_norm_noncorr.txt", 
+  sep=",", 
+  dec=".", 
+  row.names=FALSE)
+
+# Obtener una lista de variables en común de train y test 
+
+
+### Correlación conjunto de datos simplificado [6,262 × 15]
+trainetometeo_train_norm_simple <- trainetometeo_train_norm %>% select(PRODUCCION,ID_FINCA,ID_ZONA,ID_ESTACION,VARIEDAD,MODO,TIPO,COLOR,SUPERFICIE,  MSLPLocalDayAvg, PrecipAmountLocalDayAvg, RelativeHumidityLocalDayAvg, TemperatureLocalDayAvg, WindSpeedLocalDayAvg)
+
+trainetometeo_train_norm_simple_SINLOGSUPERFICIE  <- trainetometeo_train_norm_SINLOGSUPERFICIE %>% select(PRODUCCION,ID_FINCA,ID_ZONA,ID_ESTACION,VARIEDAD,MODO,TIPO,COLOR,SUPERFICIE, MSLPLocalDayAvg, PrecipAmountLocalDayAvg, TemperatureLocalDayAvg, WindSpeedLocalDayAvg, RelativeHumidityLocalDayAvg) 
+
+trainetometeo_train_log_norm_simple <- trainetometeo_train_log_norm %>% select(PRODUCCION,ID_FINCA,ID_ZONA,ID_ESTACION,VARIEDAD,MODO,TIPO,COLOR,SUPERFICIE,  MSLPLocalDayAvg, PrecipAmountLocalDayAvg, RelativeHumidityLocalDayAvg, TemperatureLocalDayAvg, WindSpeedLocalDayAvg)
+
+trainetometeo_train_norm_simple_NO_TIPOCOLOR <- trainetometeo_train_norm %>% select(PRODUCCION,ID_FINCA,ID_ZONA,ID_ESTACION,VARIEDAD,MODO, SUPERFICIE,  MSLPLocalDayAvg, PrecipAmountLocalDayAvg, RelativeHumidityLocalDayAvg, TemperatureLocalDayAvg, WindSpeedLocalDayAvg)
+
+# Obtener una lista de variables en común de train y test 
+common_vars <- intersect(names(trainetometeo_train_norm_simple), names(trainetometeo_test_norm))
+common_vars2 <- intersect(names(trainetometeo_train_log_norm_simple), names(trainetometeo_test_log_norm))
+common_vars3 <- intersect(names(trainetometeo_train_norm_simple_NO_TIPOCOLOR), names(trainetometeo_test_norm))
+common_vars4 <- intersect(names(trainetometeo_train_norm_simple_SINLOGSUPERFICIE), names(trainetometeo_test_norm_SINLOGSUPERFICIE))
+
+# Seleccionar variables en común usando select()
+trainetometeo_test_norm_simple <- select(trainetometeo_test_norm, all_of(common_vars))
+trainetometeo_test_log_norm_simple <- select(trainetometeo_test_log_norm, all_of(common_vars2))
+trainetometeo_test_norm_simple_NO_TIPOCOLOR <- select(trainetometeo_test_norm, all_of(common_vars3))
+trainetometeo_test_norm_simple_SINLOGSUPERFICIE <- select(trainetometeo_test_norm, all_of(common_vars4))
+
+## Finalmente, según la correlación simple nos quedamos con el siguiente conjunto de datos de train y test:
+
+
+##
+write.table(
+  trainetometeo_train_log_norm_simple, 
+  "data_pruebas/trainetometeo_train_log_norm_simple.txt", 
+  sep=",", 
+  dec=".", 
+  row.names=FALSE)
+
+write.table(
+  trainetometeo_test_log_norm_simple, 
+  "data_pruebas/trainetometeo_test_log_norm_simple.txt", 
+  sep=",", 
+  dec=".", 
+  row.names=FALSE)
+
+##
+write.table(
+  trainetometeo_train_norm_simple_NO_TIPOCOLOR, 
+  "data_pruebas/trainetometeo_train_norm_simple_NO_TIPOCOLOR.txt", 
+  sep=",", 
+  dec=".", 
+  row.names=FALSE)
+
+write.table(
+  trainetometeo_test_norm_simple_NO_TIPOCOLOR, 
+  "data_pruebas/trainetometeo_test_norm_simple_NO_TIPOCOLOR.txt", 
+  sep=",", 
+  dec=".", 
+  row.names=FALSE)
+
+##
+write.table(
+  trainetometeo_train_norm_simple_SINLOGSUPERFICIE, 
+  "data_pruebas/trainetometeo_train_norm_simple_SINLOGSUPERFICIE.txt", 
+  sep=",", 
+  dec=".", 
+  row.names=FALSE)
+
+write.table(
+  trainetometeo_test_norm_simple_SINLOGSUPERFICIE, 
+  "data_pruebas/trainetometeo_test_norm_simple_SINLOGSUPERFICIE.txt", 
+  sep=",", 
+  dec=".", 
+  row.names=FALSE)
+rm(common_vars)
+```
+
+
+### 6.1.1. Correlación
+
+Comprobamos la correlación de todas las variables del conjunto de datos resultante tras normalizarlo y haber aplicado el logaritmo a las variables correspondientes:
+
+```{r}
+# Seleccionamos las variables numéricas
+trainetometeo_train_log_norm_num <- trainetometeo_train_log_norm %>% select_if(is.numeric)
+
+# Hacemos la correlación
+trainetometeo_train_log_norm_corr <- cor(trainetometeo_train_log_norm_num)
+
+# Miramos sus gráfica:
+# symnum(trainetometeo_train_log_norm_corr) 
+```
+
+Observamos que las variables Maximo, Mínimo y Average están muy correlacionadas entre sí. Es coherente que presenten tanta relación lineal porque representan diferentes estadísticos para las mismas variables. Además, también es coherente que exita correlación entre variables distintas ya que unas variables pueden ser las contrarias de las otras, como por ejemplo la radiación ultravioleta por el día, y la radiación ultravioleta por la noche.
+
+
+### - Correlación conjunto de datos simplificado
+
+```{r}
+trainetometeo_train_log_norm_simple <- trainetometeo_train_log_norm %>% select(ID_FINCA,ID_ZONA,ID_ESTACION,VARIEDAD,MODO,TIPO,COLOR,SUPERFICIE,  MSLPLocalDayAvg, PrecipAmountLocalDayAvg, TemperatureLocalDayAvg, WindSpeedLocalDayAvg) #RelativeHumidityLocalDayAvg
+
+cor(trainetometeo_train_log_norm_simple %>% select_if(is.numeric))
+ggcorrplot(cor(trainetometeo_train_norm_simple %>% select_if(is.numeric)))
+```
+
+### 6.1.2. Eliminación recursiva de variables 
+
+La función "rfe" en R (Recursive Feature Elimination) es una función del paquete "caret" que se utiliza para realizar una selección de variables recursiva. Su objetivo es identificar las variables predictoras más importantes para un modelo predictivo.
+
+La función "rfe" utiliza un modelo de aprendizaje automático especificado por el usuario y realiza iteraciones de ajuste de modelo para determinar qué variables tienen el mayor impacto en la precisión de la predicción. En cada iteración, se ajusta el modelo utilizando un subconjunto de variables predictoras, y luego se evalúa la precisión de la predicción utilizando validación cruzada.
+
+"rfe" comienza con todas las variables predictoras y elimina iterativamente las variables que tienen menos impacto en la precisión de la predicción, utilizando algún criterio de selección definido por el usuario.
+
+Finalmente, la función "rfe" devuelve el subconjunto final de variables predictoras seleccionadas como las más importantes para el modelo. La selección de variables realizada por la función "rfe" puede ser utilizada para ajustar el modelo final o para realizar análisis exploratorios adicionales de las variables.
+
+En resumen, la función "rfe" es una herramienta útil para la selección de variables y la reducción de la dimensionalidad en la construcción de modelos predictivos.
+
+```{r}
+# # Cargar el paquete "caret"
+# library(caret)
+# 
+# # Cargar el conjunto de datos de entrenamiento
+# data(iris)
+# train <- iris[1:100, ]
+# 
+# # Definir el modelo base y los tamaños de subconjuntos para la selección recursiva
+# modelo_base <- trainControl(method = "cv", number = 5)
+# tamanos <- c(1:ncol(train)-1)
+# 
+# # Realizar la selección recursiva de características
+# resultado_rfe <- rfe(train[, -5], train[, 5], sizes = 12, 
+#                      rfeControl = modelo_base, method = "glm")
+#                      
+# # Resumen de los resultados de la selección recursiva
+# summary(resultado_rfe)
+# 
+# # Visualización de los resultados de la selección recursiva
+# plot(resultado_rfe, type = c("g", "o"))
+# 
+# class(train)
+```
+
+--------------------------------------------------------------------------------
+<!-- ## 5.2 PCA -->
+
+<!-- Otro método muy conocido para la reducción de varaibles de un conjunto de datos es la PCA. Antes de pasar a hacer la PCA debemos realizar la unión de los datos. Una vez tenemos los datos con la columna `CAMPANA`, agrupamos las variables por `ID_ESTACION`, mes y año por la media, de este modo tendremos las medias de todas las variables de cada medición meteorológica. -->
+
+<!-- A continuación extraemos los siguientes transformaciones de los datos de `eto`: -->
+
+<!-- ``` -->
+<!-- - La media -->
+<!-- ``` -->
+
+Antes de hacer la PCA hay que haber limpiado los datos. La PCA solo trabaja con valores numéricos por lo tanto vamos a selecionar únicamente las variables numéricas para que entre bien en la pCA. Además aunque hayamos limpiado los datosdeberíamos mirar también los NA y los duplicados antes de hacer este paso.
+
+```{r}
+# Miramos si existen valores duplicados 
+trainetometeo[duplicated(trainetometeo),]
+
+# Selccionamos únicmanete las variables numéricas
+df_PCA <- trainetometeo %>% select_if(is.numeric)
+df_PCA2 <- trainetometeo %>% select_if(is.numeric)
+```
+
+Una vez temeos los datos unidos y limpios pasamos a utilizar la PCA() de la librería FactoMineR. Este nos da resultados más detallados que otras funciones pca. Los valores ausentes se reemplazan por la media de cada columna. Pueden incluirse variables categóricas suplementarias. Estandariza automáticamente los datos.
+
+```{r}
+respca <- stats::prcomp(na.omit(df_PCA)) #, scale = TRUE
+respca2 <- stats::prcomp(na.omit(df_PCA2)) #, scale = TRUE
+
+# Esta función nos permite ver las desviaciones típicas, la rotación, los centroides y las escalas
+names(respca)
+
+# Si por ejemplo visualizamos la rotación, nos muestra el peso de las variables para cada una de las componentes
+head(respca$rotation)
+names(respca$rotation[, 1][abs(respca$rotation[,1]) > 0.5]) # SOLO ME SACA LA PRODUCCION
+
+# Número de componentes distintos 
+dim(respca$rotation)
+
+fviz_eig(respca)
+
+# Desviación típica para que nos muetre la varianza explicada por cada componenete
+respca$sdev
+
+# Varianza explicada por cada componente
+respca$sdev^2
+
+# Nos muestra el tanto por ciento de varianza explicada, la proporción  el 
+# acumulado y la proporcion
+summary(respca)
+
+# Podemos ver que el componente que más explica es el PC1 (qué son estos componenetes?)
+trainetometeo2 <- na.omit(trainetometeo) %>% select_if(is.numeric)
+x <- as.data.frame(respca$x)
+trainetometeo2$PC1 <- x$PC1
+#train2$PC2 <- x$PC2
+trainetometeo2$PC3 <- x$PC3
+#train2$PC4 <- x$PC4
+
+cor(na.omit(trainetometeo2)) # SUPERFICIE
+```
+
+Vamos a utilizar otra función para hacer esto 
+
+```{r}
+respca1 <- princomp(na.omit(df_PCA))
+respca1$loadings > 0.5
+
+names(respca1)
+respca1$sdev
+### Deverían darme las mismos resultados pero no me da (RARO?)
+summary(respca1)
+summary(respca)
+```
+
+### 6.1.3. PCA 
+
+### - Primera PCA 
+
+Fase01
+PCA sirve como una herramienta para el análisis de datos exploratorios y la detección de valores atípicos, pero también para la reducción de la dimensionalidad cuando el número de variables supera el tamaño de la muestra. Más allá de eso, la PCA también se aplica en conjuntos de datos con variables altamente redundantes, o en otras palabras, de variables altamente correlacionadas (problema de multicolinealidad). La multicolinealidad es un problema porque provoca inestabilidad en los modelos de regresión. La información redundante infla la varianza de las estimaciones de los parámetros, lo que puede hacer que sean estadísticamente insignificantes cuando de otro modo habrían sido significativos (Kerns 2010).
+
+Para no perder explicabilidad, extraeremos las N variables que mejor expliquen nuestros datos extrayendo la información de la primera componente principal, ya que es la que más 
+
+```{r}
+# pca.object <- prcomp(onehotnum, center=TRUE,scale.=TRUE)
+# summary(pca.object)
+# 
+# plot(pca.object)
+# # biplot(pca.object)
+# 
+# 
+# rot1.scaled <- scale(pca.object$rotation[,1])
+# names( which(rot1.scaled[,1] > 1.5 | rot1.scaled[,1] < -1.5) )
+# 
+# #The Rotation
+# topN <- 50
+# load.rot <- pca.object$rotation
+# names <- names(load.rot[,1][order(abs(load.rot[,1]),decreasing=TRUE)][1:topN])
+# 
+# final <- onehotnum %>% select(all_of(names))
+```
+
+Al final no hemos utilizado la PCA para reducir la dimensionalidad, sino que en su lugar hemos seleccionado las características más importantes utilizando la librería Boruta.
+
+### - PCA de los datos 
+
+De nuevo volvemos a utilizar otra función para esto, ahora utilizando PCA() de la librería FactoMineR. Este nos da resultados más detallados. Los valores ausentes se reemplazan por la media de cada columna. Pueden incluirse variables categóricas suplementarias. Estandariza automáticamente los datos.
+
+Por un lado tenemos *df_PCA (8,453 × 16)* que es la PCA de todos los datos juntos 
+Por otro lado tenemso *df_PCA2 (8,453 × 9)* que es la PCA de las seleccionadas con la correlación 
+
+```{r}
+library(FactoMineR)
+library(factoextra)
+
+# Nos muestra por un lado los vectores sobre el plano bidimensional
+# Por otro lado nos muestrs un Gráfico PCA de las variables. Donde vemos nuestras 
+# 4 componentes principales dentro de un plano bidimensional.
+respca2 <- PCA(X = df_PCA, scale.unit = TRUE, ncp = 4, graph = TRUE)
+respca2.1 <- PCA(X = df_PCA2, scale.unit = TRUE, ncp = 4, graph = TRUE)
+
+# Si imprimimos el objeto creado nos va a mostrar todas las posibilidades que tenemos. 
+# Vemos que esta función es mucho más robusta y con muchos más indicadores.
+print(respca2$var$contrib) 
+# Aquí vemos que la mayor contribución son todas las variables menos windDirection_1               
+print(respca2.1$var$contrib)
+# Aquí vemos que las variables con mayor contribución son MSLPLocalDayAvg_1, PrecipAmountLocalDayAvg_1, RelativeHumidityLocalDayAvg_1, UVIndexLocalDayAvg_1, WindSpeedLocalDayAvg_1
+
+# get_pca(respca2)
+# head(respca2$var) #como ejemplo
+
+```
+
+```{r}
+get_pca_var(respca2)$contrib #Extrae la información sobre las variables.
+get_pca_ind(respca2) #Extrae la información sobre las observaciones.
+```
+
+Visualización de lo que acabamos de ver de respca2
+
+```{r}
+# Varianza explicada del factor 1 y cuanto explica el resto de componentes
+fviz_eig(respca2) #visualizar eigenvalores (scree plot)
+fviz_eig(respca2.1) 
+# Representación de observaciones sobre componentes principales. Nos va a mostrar 
+# sobre los individuos que es lo que está pasando. Donde se situan cada uno de 
+# nuestros datos. Esta es la primera aproximación que hacemos. 
+
+### Podemos ver una clara clasificación de grupos
+fviz_pca_ind(respca2) 
+
+# Representamos lo mismo pero visualizando los colores por coseno al cuadrado. Los que están en el centro son los que menos se alejan de los ejes y cuanto más se van alejando 
+fviz_pca_ind(respca2,
+             col.ind = "cos2", # Color by the quality of representation
+             geom="point", # Añadimos para que se nos visualicen únicamente los puntos
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = FALSE     # Avoid text overlapping, 
+             # en nuestro caso no nos interesa porque tenemos tantos datos que nos colapsa el ordenador 
+)
+
+# Si queremos visualizarlo por algún grupo 
+fviz_pca_ind(respca2, habillage=trainetometeo$CAMPANA, ellipse.level=0.95)
+# Se ha probado también con tipo, color, variedad, id_estacion
+```
+
+```{r}
+#Representación de variables sobre componentes principales. Mismos planos que cuando hacíamos la PCA.
+fviz_pca_var(respca2) 
+
+respca2$var$contrib
+
+# Este gráfico nos interesa porque luego lo pdemos fusionar con el que ha hecho la PCA
+fviz_pca_var(respca2,
+             col.var = "contrib", # Color by contributions to the PC
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE)     # Avoid text overlapping
+
+fviz_pca_biplot(respca2, label ="var", col.ind="cos2") +
+       theme_minimal()
+
+```
+
+```{r}
+fviz_pca_biplot(respca2.1, label ="var", col.ind="cos2") +
+       theme_minimal()
+
+# Si comparamos esta gráfica por la contribución mayor que 0.5 por un lado vemos que las variables MSLPLocalDayAvg_1, PrecipAmountLocalDayAvg_1, RelativeHumidityLocalDayAvg_1, UVIndexLocalDayAvg_1, WindSpeedLocalDayAvg_1 tienen bastante contribución en la componente principal 1. 
+respca2.1$var$contrib
+
+# Representación de variables sobre componentes principales. Mismos planos que cuando hacíamos la PCA.
+# Este gráfico nos interesa porque luego lo pdemos fusionar con el que ha hecho la PCA. 
+# En este gráfico en cambio vemos que las varibales que más contribuyen  PRODUCCIÓN, SUPERFICIE RelativeHumidityLocalDayAvg_1, UVIndexLocalDayAvg_1, WindSpeedLocalDayAvg_1 son las que tienen una mayor contribución de los datos.
+
+fviz_pca_var(respca2.1,
+             col.var = "contrib", # Color by contributions to the PC
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE)     # Avoid text overlapping
+```
+
+### - PCA con las variables seleccionadas a mano
+
+```{r}
+# # Perform PCA on the iris dataset
+# pca <- prcomp(trainetometeo %>% select_if(is.numeric))
+# 
+# # Get the loadings of the principal components
+# loadings <- pca$rotation
+# 
+# # Get the absolute values of the loadings
+# abs_loadings <- abs(loadings)
+# 
+# # Sort the absolute loadings in descending order
+# sorted_loadings <- apply(abs_loadings, 2, sort, decreasing = TRUE)
+# 
+# # Get the names of the features
+# features <- names(iris[,1:4])
+# 
+# # Get the top features with the highest absolute loadings
+# top_features <- matrix(nrow = ncol(sorted_loadings), ncol = 3)
+# for(i in 1:ncol(sorted_loadings)){
+#   top_features[i,] <- c(features[which(abs_loadings[,i] == sorted_loadings[1,i])],
+#                          features[which(abs_loadings[,i] == sorted_loadings[2,i])],
+#                          features[which(abs_loadings[,i] == sorted_loadings[3,i])])
+# }
+# 
+# # Print the top features for each principal component
+# for(i in 1:ncol(top_features)){
+#   cat("PC", i, ":", paste(top_features[,i], collapse = ", "), "\n")
+# }
+```
+
+We then get the loadings of the principal components using pca$rotation and the absolute values of the loadings using abs(). We sort the absolute loadings in descending order using apply() and sort(). We get the names of the features using names(). Finally, we get the top features with the highest absolute loadings for each principal component by selecting the features with the top three absolute loadings using which() and storing them in a matrix called top_features. We print the top features for each principal component using a loop and cat()
+
+## 6.2. Selección de características variables categóricas
+
+No vamos a realizar selección de caracteristicas de variables categoricas
+
+7 sin 2
+ 
+### 6.2.1. One-hot
+
+<!-- # One-hot variables categóricas -->
+
+<!-- Dummificamos para tener la información de las variables categóricas de forma numérica en ceros y unos. -->
+
+```{r message=FALSE, warning=FALSE}
+# onehot <- one_hot(as.data.table(trainetometeo[,-1:-8]))
+```
+
+<!-- ## Solucionar datos después del Onehot -->
+
+```{r}
+# # seleccionamos los índices de las columnas numéricas  
+# onehotungroup <- onehotclean %>% ungroup() # %>% select_if(is.numeric)
+# trainetometeofactor <- trainetometeo %>% select_if(is.factor)
+# 
+# onehotsol <- cbind(onehotungroup, trainetometeofactor %>% select(!CAMPANA))
+# # onehotsol$PRODUCCION <- NULL
+# onehotsol[duplicated(onehotsol),]
+# rm(onehotungroup, trainetometeofactor)
+```
+
+<!-- Tenemos valores que están duplicados. Para solucionar esto, como la producción de las filas de train está compuesto por un identificador de ID_ESTACION, ID_FINCA, ID_ZONA, CAMPAÑA y MODO, creamos un índice único para estos valores. -->
+
+```{r}
+# # #creamos un indice único para cada fila
+# # onehotsol$ID <- seq.int(nrow(onehotsol))
+# # onehotsol[duplicated(onehotsol),]
+# 
+# # #set ID column as row names
+# # rownames(onehotnum) <- onehotnum$ID
+# 
+# # #remove original ID column from data frame
+# # onehotnum$ID <- NULL
+# # onehotnum <- tibble::rowid_to_column(onehotnum, "ID")
+```
+
+<!-- En ocasiones después de dummificar puede ser que algunas de las nuevas columnas generadas contengan valores muy poco variantes. En esos casos eliminamos las variables cuya varianza sea casi 0, lo cual indica que la variable es constante o casi. -->
+
+<!-- Estas son las variables con varianza casi cero: -->
+
+```{r}
+# which(apply(onehotsol, 2, var)==0)
+```
+
+<!-- Eliminamos estas variables: -->
+
+```{r}
+# onehotclean <- onehotsol[, which(apply(onehotsol, 2, var) != 0)]
+# # indx <- grepl('Dew', colnames(eto))
+# # onehotnum <- onehotnum %>% select(c(colnames(onehotnum)[onehotnumc]))
+# rm(onehotsol)
+```
+
+###  6.2.2. Boruta
+
+Boruta extrae la importancia de las características en un conjunto de datos.
+
+Cataloga las variables como importantes y sin importancia, pero en ocasiones hay algunas que cataloga en la categoría tentativa. Esto significa que estas variables tienen una importancia tan cercana a sus mejores funciones de sombra que Boruta no puede tomar una decisión con la confianza deseada en el número predeterminado de ejecuciones de Random Forest. Es por ello que aumentamos el parámetro `maxRuns` para evitar que deje por clasificar variables.
+
+```{r}
+# boruta <- Boruta(PRODUCCION~., data=train, maxRuns=101, doTrace = 3)
+```
+
+```{r}
+# print(boruta)
+```
+
+```{r}
+# plot(trainboruta, xlab = "", xaxt = "n")
+# lz<-lapply(1:ncol(trainboruta$ImpHistory),function(i)
+# trainboruta$ImpHistory[is.finite(trainboruta$ImpHistory[,i]),i])
+# names(lz) <- colnames(trainboruta$ImpHistory)
+# Labels <- sort(sapply(lz,median))
+# axis(side = 1,las=2,labels = names(Labels),
+# at = 1:ncol(trainboruta$ImpHistory), cex.axis = 0.7)
+```
+
+```{r}
+# plot(TentativeRoughFix(boruta))
+```
+
+```{r}
+# boruta_vars <- attStats(boruta)
+# boruta_vars
+```
+
+```{r}
+# boruta_imp <- boruta_vars[boruta_vars$medianImp > 6,]
+# boruta_train <- cbind(target, train[rownames(boruta_imp)])
+# boruta_test <- cbind(target[(nrow(train) + 1):9601], test[rownames(boruta_imp)])
+```
+
+### 6.2.3. Descarga de datasets categóricos seleccionando características.
+
+```{r}
+# write.table(
+#   boruta_train, 
+#   "data/boruta_train.txt", 
+#   sep=",", 
+#   dec=".", 
+#   row.names=FALSE)
+# 
+# write.table(
+#   boruta_test, 
+#   "data/boruta_test.txt", 
+#   sep=",", 
+#   dec=".", 
+#   row.names=FALSE)
+```
+
+# 7. Mejoras del proyecto 
+
+En este apartado se añadiran las mejoras que podríamos haber hecho en el proyecto. Para fruturos trabajos y proyectos.
+
+## 7.1. Comprobar la superficie
+
+- ???comprobar con plots que tienen una superficie parecida entre cada año
+
+## 7.2. Data Augmentation
+
+<!-- ## 3.0 Resolver unión -->
+
+<!-- Tras haber unido los 3 datasets (train, eto y meteo), como los datasets meteorológicos no contenían información sobre los datos meteorológicos del año 14 y 15 se nos quedan nulos.-->
+
+???Resolver unión, comovamos a quitar los valores de las campañas 14 y 15 este apartado se deja puesto para el dataaugmentation si más adelante decidimos completar los datos de estas variables meteorológicas.  Por un lado, podemos completarlos con la media de los datos de otros años. Esto solo si estan mu correlacionadas y siguen la misma distribución. También podemos completarlos a partir de los datos buscados por Irina de los datos meteorológicos de alicante (zona más cercana a la viña que hemos encontrado). La ultima opción sería eliminarlos y no trabajar con ellos. Responder a la pregunta: ¿Sale mejor la predicción del modelo sin estos datos o con los datos añadidos?
+
+
+```{r}
+# trainetometeo %>%
+  # ggplot(aes(CAMPANA, SUPERFICIE)) +
+  # geom_point()
+```
+
+Explicar por que mejoraría haber rellenado los datos de las campañas 14 y 15.
+
+# 8. Modelos locales 
+
+## 8.1. Creación de varios dataframes para modelos locales
+
+### 8.1.1. Variable RENDIMIENTO
+
+```{r}
+train <- train %>% 
+  group_by(ID_FINCA, ID_ZONA, ID_ESTACION, VARIEDAD, MODO, TIPO, COLOR) %>%
+  mutate(AVG_PRODUCCION = mean(PRODUCCION, na.rm = TRUE)) %>% ungroup()
+
+train <- train %>% mutate(AVG_PRODUCCION = ifelse(is.na(AVG_PRODUCCION), median(AVG_PRODUCCION, na.rm=TRUE), AVG_PRODUCCION)) %>%
+  mutate(RENDIMIENTO = AVG_PRODUCCION/SUPERFICIE)
+
+percentiles <- quantile(train$RENDIMIENTO, probs = c(25, 50, 75)/100, na.rm = TRUE)
+percentiles
+```
+
+```{r}
+train <- train %>% select(-ALTITUD)
+
+test <- train %>% filter(CAMPANA == 22)
+
+train <- train %>% filter(CAMPANA != 22)
+```
+
+```{r}
+train_0_25 <- train %>% 
+  filter(RENDIMIENTO < percentiles["25%"]) %>%
+  select(-RENDIMIENTO, -AVG_PRODUCCION)
+train_25_50 <- train %>% 
+  filter(RENDIMIENTO < percentiles["50%"]) %>%
+  filter(RENDIMIENTO >= percentiles["25%"]) %>%
+  select(-RENDIMIENTO, -AVG_PRODUCCION)
+train_50_75 <- train %>% 
+  filter(RENDIMIENTO < percentiles["75%"]) %>%
+  filter(RENDIMIENTO >= percentiles["50%"]) %>%
+  select(-RENDIMIENTO, -AVG_PRODUCCION)
+train_75_100 <- train %>% 
+  filter(RENDIMIENTO >= percentiles["75%"]) %>%
+  select(-RENDIMIENTO, -AVG_PRODUCCION)
+```
+
+```{r}
+write.table(
+  train_0_25, 
+  "data/group_train_0_25.txt", 
+  sep=",", 
+  dec=".", 
+  row.names=FALSE)
+
+write.table(
+  train_25_50, 
+  "data/group_train_25_50.txt", 
+  sep=",", 
+  dec=".", 
+  row.names=FALSE)
+
+write.table(
+  train_50_75, 
+  "data/group_train_50_75.txt", 
+  sep=",", 
+  dec=".", 
+  row.names=FALSE)
+
+write.table(
+  train_75_100, 
+  "data/group_train_75_100.txt", 
+  sep=",", 
+  dec=".", 
+  row.names=FALSE)
+```
+
+```{r}
+test_0_25 <- test %>% 
+  filter(RENDIMIENTO < percentiles["25%"]) %>%
+  select(-RENDIMIENTO, -AVG_PRODUCCION)
+test_25_50 <- test %>% 
+  filter(RENDIMIENTO < percentiles["50%"]) %>%
+  filter(RENDIMIENTO >= percentiles["25%"]) %>%
+  select(-RENDIMIENTO, -AVG_PRODUCCION)
+test_50_75 <- test %>% 
+  filter(RENDIMIENTO < percentiles["75%"]) %>%
+  filter(RENDIMIENTO >= percentiles["50%"]) %>%
+  select(-RENDIMIENTO, -AVG_PRODUCCION)
+test_75_100 <- test %>% 
+  filter(RENDIMIENTO >= percentiles["75%"]) %>%
+  select(-RENDIMIENTO, -AVG_PRODUCCION)
+```
+
+```{r}
+write.table(
+  test_0_25, 
+  "data/group_test_0_25.txt", 
+  sep=",", 
+  dec=".", 
+  row.names=FALSE)
+
+write.table(
+  test_25_50, 
+  "data/group_test_25_50.txt", 
+  sep=",", 
+  dec=".", 
+  row.names=FALSE)
+
+write.table(
+  test_50_75, 
+  "data/group_test_50_75.txt", 
+  sep=",", 
+  dec=".", 
+  row.names=FALSE)
+
+write.table(
+  test_75_100, 
+  "data/group_test_75_100.txt", 
+  sep=",", 
+  dec=".", 
+  row.names=FALSE)
+```
+
+### 8.1.2. Variable TIPO
+
+```{r}
+ggplot(train, aes(x = TIPO, y = PRODUCCION)) + 
+  geom_boxplot() +
+  xlab("x") + ylab("y")
+```
+
+```{r}
+split_list <- split(train, list(train$TIPO))
+df1 <- split_list[[1]]
+df2 <- split_list[[2]]
+```

@@ -1,0 +1,9 @@
+data/
+results/
+*.pdf
+.Rproj.user
+.RData
+.Rhistory
+unity-cajamar.Rproj
+cajamar23_files/
+data_pruebas/
