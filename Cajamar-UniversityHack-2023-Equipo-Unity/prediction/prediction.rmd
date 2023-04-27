@@ -89,12 +89,6 @@ train <- train %>% mutate(CAMPANA = as.factor(CAMPANA),
 
 Los datos de `eto` contienen información horaria agregada y transformada de las estaciones climatológicas de The Weather Company por contenidas en `meteo`. Este último dataset dispone de numerosas variables meteorológicas detalladas de la última hora, las últimas 6 horas, las últimas 24 horas, etc., haciendo que `eto` sea un resumen de los periodos con el siguiente patrón: 'Variable + "Local" + periodo + tipo de agregación'.
 
-???Primero veamos qué variables tienen en común:
-
-```{r}
-intersect(names(eto), names(meteo))
-```
-
 Las variables que no están contenidas en el dataset `eto` son las siguientes:
 
 pressureChange, pressureMeanSeaLevel, windDirection , windGust
@@ -503,8 +497,6 @@ rm(trainetometeo_train_log_norm_num,
  trainetometeo_train_log_norm_num_corr, trainetometeo_train_log_norm_nonum)
 ```
 
-?? Explicar que una vez hecha la correlación nos damos cuenta que las siguientes variables son las que más se correlacionan con la producción. Mostramos por un lado a la izquierda las variables y a su derecha la correlación con la producción.
-
 ```{r}
 orden_cor <- sort(abs(trainetometeo_train_log_norm_corr["PRODUCCION",]), decreasing = TRUE)
 ```
@@ -697,12 +689,6 @@ trainetometeo_test_norm_simple <- select(trainetometeo_test_norm, all_of(common_
 trainetometeo_test_norm_simple2 <- select(trainetometeo_test_norm, all_of(common_vars4))
 
 # Finalmente, según la correlación simple nos quedamos con el siguiente conjunto de datos de train y test:
-write.table(trainetometeo_train_log_norm_corr1, 
-  "data_pruebas/trainetometeo_train_log_norm_corr1.txt", 
-  sep=",", dec=".", row.names=FALSE)
-write.table(trainetometeo_test_log_norm_corr1, 
-  "data_pruebas/trainetometeo_test_log_norm_corr1.txt", 
-  sep=",", dec=".", row.names=FALSE)
 write.table(trainetometeo_train_log_norm_corr2, 
   "data_pruebas/trainetometeo_train_log_norm_corr2.txt", 
   sep=",", dec=".", row.names=FALSE)
@@ -710,18 +696,6 @@ write.table(trainetometeo_test_log_norm_corr2,
   "data_pruebas/trainetometeo_test_log_norm_corr2.txt", 
   sep=",", dec=".", row.names=FALSE)
 
-write.table(trainetometeo_train_norm_simple, 
-  "data_pruebas/trainetometeo_train_norm_simple.txt", 
-  sep=",", dec=".", row.names=FALSE)
-write.table(trainetometeo_test_norm_simple, 
-  "data_pruebas/trainetometeo_test_norm_simple.txt", 
-  sep=",", dec=".", row.names=FALSE)
-write.table(trainetometeo_train_norm_simple2, 
-  "data_pruebas/trainetometeo_train_norm_simple2.txt", 
-  sep=",", dec=".", row.names=FALSE)
-write.table(trainetometeo_test_norm_simple2, 
-  "data_pruebas/trainetometeo_test_norm_simple2.txt", 
-  sep=",", dec=".", row.names=FALSE)
 ```
 
 ```{r}
@@ -733,21 +707,6 @@ common_vars2 <- intersect(names(trainetometeo_train_log_norm_lm2), names(trainet
 # Seleccionar variables en común usando select()
 trainetometeo_test_norm_lm1 <- select(trainetometeo_test_norm, all_of(common_vars1))
 trainetometeo_test_log_norm_lm2 <- select(trainetometeo_test_log_norm, all_of(common_vars2))
-
-# Finalmente, según la regresión lineal nos quedamos con el siguiente conjunto de datos de train y test:
-write.table(trainetometeo_train_norm_lm1, 
-  "data_pruebas/trainetometeo_train_norm_lm1.txt", 
-  sep=",", dec=".", row.names=FALSE)
-write.table(trainetometeo_test_norm_lm1, 
-  "data_pruebas/trainetometeo_test_norm_lm1.txt", 
-  sep=",", dec=".", row.names=FALSE)
-
-write.table(trainetometeo_train_log_norm_lm2, 
-  "data_pruebas/trainetometeo_train_log_norm_lm2.txt", 
-  sep=",", dec=".", row.names=FALSE)
-write.table(trainetometeo_test_log_norm_lm2, 
-  "data_pruebas/trainetometeo_test_log_norm_lm2.txt", 
-  sep=",", dec=".", row.names=FALSE)
 ```
 
 
@@ -760,11 +719,7 @@ Eliminamos todos los datasets para quedarnos únicamente con el ganador
 rm(list = ls()[!ls() %in% "trainetometeo_train_log_norm_corr2"])
 ```
 
-?? Poner una captura de los modelos para explicar que nos quedamos con el trainetometeo_train_norm la segunda correlación que sería: trainetometeo_train_log_norm_corr2
-
-?? Tenemos que explicar que para basarnos en los datos de la correlación hemos utilizado los datos en log pero que a la hora de seleccionar las variables en el conjunto de datos le hemos quitado el log para no perder la interpretación de los datos y puede ser menos útil cuando se desea comparar las relaciones relativas entre las variables.
-
-?? Una vez decidamos cuáles son los procesos de selección de características que nos producen mejores resultados. Podemos decir definitvamente que es el siguiente:
+Podemos decir definitvamente que es el siguiente:
 
 ```{r}
 summary(trainetometeo_train_log_norm_corr2)

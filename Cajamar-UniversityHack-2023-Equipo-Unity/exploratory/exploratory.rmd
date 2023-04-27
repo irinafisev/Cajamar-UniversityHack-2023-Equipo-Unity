@@ -234,8 +234,7 @@ TempDayAvg_my %>%
   geom_line(aes(color =  factor(year)))
 ```
 
-Coloreado por estación podemos ver que las estaciones de ID más alto tienen temperaturas más bajas. Haciendo el gráfico solo del año 2019 podemos observar que es así (para ese año en este caso). Por último solapando los años en una misma gráfica podemos observar la relación de la temperatura en comparación con todos los años. Parece que ha habido una temperatura estable a lo largo de todos los años, pero notamos un pico que ???.
-
+Coloreado por estación podemos ver que las estaciones de ID más alto tienen temperaturas más bajas. Haciendo el gráfico solo del año 2019 podemos observar que es así (para ese año en este caso). Por último solapando los años en una misma gráfica podemos observar la relación de la temperatura en comparación con todos los años
 
 Seleccionamos una estación y visualizamos la variable DewpointLocalAfternoonAvg_1 para el ID_ESTACION 0:
 
@@ -300,7 +299,7 @@ train_superficie %>%
 ```
 
 Como hay Fincas que no tienen valor de superficie en ningún caso, es decir, no existe ninguna fila para la cual ese identificador de finca tenga al menos un valor de superficie, debemos completar esos valores faltantes. Para realizar esa tarea, se abordará de 2 formas:
-1. Se sustituirán dichos valores por la mediana agrupada por la campaña. Se elige la mediana en este caso, porque ???.
+1. Se sustituirán dichos valores por la mediana agrupada por la campaña. Se elige la mediana en este caso, porque se trata de una variable categórica.
 2. Se predecirán los valores faltantes ya que superficie y producción parece que sigan una regresión lineal.
 
 Aproximación 1: Mediana.
@@ -372,7 +371,6 @@ rmse <- sqrt(mean((train_superficie.test$SUPERFICIE-pred)^2))
 train_superficie_regresion <- train_superficie %>% mutate(SUPERFICIE=ifelse(is.na(SUPERFICIE),predict(lm1,.),SUPERFICIE))
 
 # Se quedan 2 filas con superficie faltante y sustituimos esos 2 datos por la media agrupada por campaña
-# ???comprobar con plots que tienen una superficie parecida entre cada año
 train_superficie_regresion_mediana <- train_superficie_regresion %>% group_by(CAMPANA) %>% mutate(SUPERFICIE = ifelse(is.na(SUPERFICIE), median(SUPERFICIE, na.rm=TRUE), SUPERFICIE)) %>% ungroup()
 
 # Observamos los resultados
@@ -406,7 +404,7 @@ train_superficie_regresion_mediana %>% filter(CAMPANA!=22) %>%
   geom_point()
 ```
 
-La aproximación 2 (regresión lineal) queda mejor integrada con el resto de valores de superficie. ???
+La aproximación 2 (regresión lineal) queda mejor integrada con el resto de valores de superficie.
 
 ```{r}
 train_superficie_mediana %>%
@@ -421,8 +419,6 @@ train_superficie_regresion_mediana %>%
   ggplot(aes(ID_FINCA, SUPERFICIE)) +
   geom_point()
 ```
-
-Del mismo modo, la aproximación 2 (regresión lineal) ???...
 
 
 ### 2.3.1. Guardar datasets
@@ -578,12 +574,6 @@ meteo_na <- meteo_na[-1]
 ### 2.2.1 Selección de variables de meteo
 
 Los datos de `eto` contienen información horaria agregada y transformada de las estaciones climatológicas de The Weather Company por contenidas en `meteo`. Este último dataset dispone de numerosas variables meteorológicas detalladas de la última hora, las últimas 6 horas, las últimas 24 horas, etc., haciendo que `eto` sea un resumen de los periodos con el siguiente patrón: 'Variable + "Local" + periodo + tipo de agregación'.
-
-???Primero veamos qué variables tienen en común:
-
-```{r}
-intersect(names(eto), names(meteo))
-```
 
 Las variables que no están contenidas en el dataset `eto` son las siguientes:
 
@@ -1188,7 +1178,7 @@ write.table(
 # Guardamos las medias y las desviaciones estándar de todas las variables
 write.table(
   mean_sd_log,
-  "data_pruebas/mean_sd_log.txt",
+  "mean_sd_log.txt",
   sep=",",
   dec=".",
   row.names=FALSE)
@@ -1240,14 +1230,14 @@ trainetometeo_test_norm_noncorr <- select(trainetometeo_train_norm, all_of(commo
 ## Finalmente, según la correlación del df nos quedamos con el siguiente conjunto de datos de train y test:
 write.table(
   trainetometeo_train_norm_noncorr, 
-  "data_pruebas/trainetometeo_train_norm_noncorr.txt", 
+  "trainetometeo_train_norm_noncorr.txt", 
   sep=",", 
   dec=".", 
   row.names=FALSE)
 
 write.table(
   trainetometeo_test_norm_noncorr, 
-  "data_pruebas/trainetometeo_test_norm_noncorr.txt", 
+  "trainetometeo_test_norm_noncorr.txt", 
   sep=",", 
   dec=".", 
   row.names=FALSE)
@@ -1282,14 +1272,14 @@ trainetometeo_test_norm_simple_SINLOGSUPERFICIE <- select(trainetometeo_test_nor
 ##
 write.table(
   trainetometeo_train_log_norm_simple, 
-  "data_pruebas/trainetometeo_train_log_norm_simple.txt", 
+  "trainetometeo_train_log_norm_simple.txt", 
   sep=",", 
   dec=".", 
   row.names=FALSE)
 
 write.table(
   trainetometeo_test_log_norm_simple, 
-  "data_pruebas/trainetometeo_test_log_norm_simple.txt", 
+  "trainetometeo_test_log_norm_simple.txt", 
   sep=",", 
   dec=".", 
   row.names=FALSE)
@@ -1297,14 +1287,14 @@ write.table(
 ##
 write.table(
   trainetometeo_train_norm_simple_NO_TIPOCOLOR, 
-  "data_pruebas/trainetometeo_train_norm_simple_NO_TIPOCOLOR.txt", 
+  "trainetometeo_train_norm_simple_NO_TIPOCOLOR.txt", 
   sep=",", 
   dec=".", 
   row.names=FALSE)
 
 write.table(
   trainetometeo_test_norm_simple_NO_TIPOCOLOR, 
-  "data_pruebas/trainetometeo_test_norm_simple_NO_TIPOCOLOR.txt", 
+  "trainetometeo_test_norm_simple_NO_TIPOCOLOR.txt", 
   sep=",", 
   dec=".", 
   row.names=FALSE)
@@ -1312,14 +1302,14 @@ write.table(
 ##
 write.table(
   trainetometeo_train_norm_simple_SINLOGSUPERFICIE, 
-  "data_pruebas/trainetometeo_train_norm_simple_SINLOGSUPERFICIE.txt", 
+  "trainetometeo_train_norm_simple_SINLOGSUPERFICIE.txt", 
   sep=",", 
   dec=".", 
   row.names=FALSE)
 
 write.table(
   trainetometeo_test_norm_simple_SINLOGSUPERFICIE, 
-  "data_pruebas/trainetometeo_test_norm_simple_SINLOGSUPERFICIE.txt", 
+  "trainetometeo_test_norm_simple_SINLOGSUPERFICIE.txt", 
   sep=",", 
   dec=".", 
   row.names=FALSE)
@@ -1746,26 +1736,7 @@ Cataloga las variables como importantes y sin importancia, pero en ocasiones hay
 
 En este apartado se añadiran las mejoras que podríamos haber hecho en el proyecto. Para fruturos trabajos y proyectos.
 
-## 7.1. Comprobar la superficie
-
-- ???comprobar con plots que tienen una superficie parecida entre cada año
-
-## 7.2. Data Augmentation
-
-<!-- ## 3.0 Resolver unión -->
-
-<!-- Tras haber unido los 3 datasets (train, eto y meteo), como los datasets meteorológicos no contenían información sobre los datos meteorológicos del año 14 y 15 se nos quedan nulos.-->
-
-???Resolver unión, comovamos a quitar los valores de las campañas 14 y 15 este apartado se deja puesto para el dataaugmentation si más adelante decidimos completar los datos de estas variables meteorológicas.  Por un lado, podemos completarlos con la media de los datos de otros años. Esto solo si estan mu correlacionadas y siguen la misma distribución. También podemos completarlos a partir de los datos buscados por Irina de los datos meteorológicos de alicante (zona más cercana a la viña que hemos encontrado). La ultima opción sería eliminarlos y no trabajar con ellos. Responder a la pregunta: ¿Sale mejor la predicción del modelo sin estos datos o con los datos añadidos?
-
-
-```{r}
-# trainetometeo %>%
-  # ggplot(aes(CAMPANA, SUPERFICIE)) +
-  # geom_point()
-```
-
-Explicar por que mejoraría haber rellenado los datos de las campañas 14 y 15.
+Data Augmentation: Resolver unión, comovamos a quitar los valores de las campañas 14 y 15 este apartado se deja puesto para el dataaugmentation si más adelante decidimos completar los datos de estas variables meteorológicas.  Por un lado, podemos completarlos con la media de los datos de otros años. Esto solo si estan mu correlacionadas y siguen la misma distribución. También podemos completarlos a partir de los datos buscados por Irina de los datos meteorológicos de alicante (zona más cercana a la viña que hemos encontrado). La ultima opción sería eliminarlos y no trabajar con ellos. Responder a la pregunta: ¿Sale mejor la predicción del modelo sin estos datos o con los datos añadidos?
 
 # 8. Modelos locales 
 
@@ -1813,28 +1784,28 @@ train_75_100 <- train %>%
 ```{r}
 write.table(
   train_0_25, 
-  "data/group_train_0_25.txt", 
+  "group_train_0_25.txt", 
   sep=",", 
   dec=".", 
   row.names=FALSE)
 
 write.table(
   train_25_50, 
-  "data/group_train_25_50.txt", 
+  "group_train_25_50.txt", 
   sep=",", 
   dec=".", 
   row.names=FALSE)
 
 write.table(
   train_50_75, 
-  "data/group_train_50_75.txt", 
+  "group_train_50_75.txt", 
   sep=",", 
   dec=".", 
   row.names=FALSE)
 
 write.table(
   train_75_100, 
-  "data/group_train_75_100.txt", 
+  "group_train_75_100.txt", 
   sep=",", 
   dec=".", 
   row.names=FALSE)
@@ -1860,28 +1831,28 @@ test_75_100 <- test %>%
 ```{r}
 write.table(
   test_0_25, 
-  "data/group_test_0_25.txt", 
+  "group_test_0_25.txt", 
   sep=",", 
   dec=".", 
   row.names=FALSE)
 
 write.table(
   test_25_50, 
-  "data/group_test_25_50.txt", 
+  "group_test_25_50.txt", 
   sep=",", 
   dec=".", 
   row.names=FALSE)
 
 write.table(
   test_50_75, 
-  "data/group_test_50_75.txt", 
+  "group_test_50_75.txt", 
   sep=",", 
   dec=".", 
   row.names=FALSE)
 
 write.table(
   test_75_100, 
-  "data/group_test_75_100.txt", 
+  "group_test_75_100.txt", 
   sep=",", 
   dec=".", 
   row.names=FALSE)
