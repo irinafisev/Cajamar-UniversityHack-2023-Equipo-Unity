@@ -1,5 +1,7 @@
 # Cajamar UniversityHack 2023 Equipo Unity
-Nuestro propósito, y objetivo de **UniversityHack 2023**, es plantear una previsión de la producción de uvas en el año 2022 mediante algoritmos de predicción. Para ello, se dispone de un conjunto de datos con histórico de producciones de los viñedos que conforman la cooperativa La Viña, así como histórico de la climatología de los mismos de The Weather Company.
+El propósito de Unity, y objetivo de **UniversityHack 2023**, es plantear una previsión de la producción de uvas en el año 2022 mediante algoritmos de predicción. Para ello, se dispone de un conjunto de datos con histórico de producciones de los viñedos que conforman la cooperativa La Viña, así como histórico de la climatología de los mismos de The Weather Company.
+
+**Unity** está conformado por: [Elena Marrero Castellano](https://www.linkedin.com/in/emacas/), [Moisés Barrios Torres](https://www.linkedin.com/in/mois%C3%A9s-barrios-torres-507221175/), e [Irina Filimonova Sevcenco](https://www.linkedin.com/in/irina-filimonova-sevcenco/).
 
 ## Instrucciones de uso
 Este proyecto se ha realizado en los lenguajes de programación de **Python** y **R**. El análisis exploratorio y el tratamiento de los datos se ha hecho en R utilizando librerías como *tidyr*, *dplyr* o *ggplot2*, y la selección de modelos se ha realizado en Python utilizando paquetes como *sklearn*.
